@@ -1,205 +1,290 @@
 """
-Конвертер спецификации Компас (.xls выгрузка) -> Excel для калькулятора раскроя.
-
-Блок 2 (извлечение) + Блок 3 (классификация и нормализация) из общей схемы.
-Выход: книга с листами "Детали" и "Материалы" в формате smart_cut_app,
-плюс лист "Проверка" с пометками для человека и лист "Отсечено" (листы/2D).
+Конвертер спецификации Компас (.xls) -> Excel для калькулятора раскроя.
+Версия 3:
+  - автоопределение исполнений (несколько колонок "Количество") и их разворот
+    в плоский список (номер исполнения -> в примечание детали);
+  - протягивание базового обозначения, суффикс доработки _д/_дN;
+  - марка С255/чистая/Сталь N; конфликт размера наимен. vs сортамент;
+  - "умный" светофор: статус строки по заполненности + валидности кода,
+    доработка отдельным флагом (не мешает зелёному).
 """
 import re
 import sys
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.formatting.rule import FormulaRule
 
-# ----- карта профилей (как в калькуляторе) -----
 PROFILE_MAP = {
-    "Труба профильная": "ТР-П",
-    "Труба круглая": "ТР-К",
-    "Швеллер": "ШВ",
-    "Уголок": "УГ",
-    "Полоса": "ПЛ",
-    "Круг": "КР",
+    "Труба профильная": "ТР-П", "Труба круглая": "ТР-К", "Швеллер": "ШВ",
+    "Уголок": "УГ", "Полоса": "ПЛ", "Круг": "КР",
 }
-STOCK_LENGTH_DEFAULT = {  # типовая длина хлыста, мм
-    "ТР-П": 6000, "ТР-К": 6000, "ШВ": 11700, "УГ": 11700, "ПЛ": 6000, "КР": 6000,
-}
-
-# ----- 2D-профили, которые НЕ идут в линейный раскрой -----
-SHEET_KEYWORDS = ("Лист", "Пластина", "Косынка", "Ребро", "Полоса")
+STOCK_LENGTH_DEFAULT = {"ТР-П": 6000, "ТР-К": 6000, "ШВ": 11700, "УГ": 11700, "ПЛ": 6000, "КР": 6000}
+SHEET_KEYWORDS = ("Лист", "Пластина", "Косынка", "Ребро", "Сетка", "Скоба",
+                  "Бобышка", "Гайка", "Болт", "Шайба", "Винт")
 
 
-def classify_profile(naim: str):
-    """Определяет тип профиля и размер из наименования детали."""
+def normalize_size(s):
+    return s.strip().upper().replace("X", "х").replace("*", "х").replace(" ", "")
+
+
+def classify_profile(naim):
     n = naim.strip()
-    # Труба XXxYYxZZ (профильная/прямоугольная) или XXxYY (квадрат)
     m = re.search(r"Труба\s+([\dхx*]+)", n, re.I)
     if m:
-        size = normalize_size(m.group(1))
-        # квадрат 50х50х4 / прямоуг 60х40х2 -> профильная
-        return "Труба профильная", size
-    m = re.search(r"Швеллер\s*№?\s*([\dПпUu]+)", n, re.I)
+        return "Труба профильная", normalize_size(m.group(1))
+    m = re.search(r"Швеллер\s*№?\s*([\dПпUuУу]+)", n, re.I)
     if m:
-        return "Швеллер", m.group(1).upper().replace("U", "П")
+        return "Швеллер", m.group(1).upper().replace("U", "П").replace("У", "П")
     m = re.search(r"Уголок\s+([\dхx*]+)", n, re.I)
     if m:
         return "Уголок", normalize_size(m.group(1))
     return None, None
 
 
-def normalize_size(s: str) -> str:
-    return s.strip().upper().replace("X", "х").replace("*", "х").replace(" ", "")
+def parse_designation(obozn, base):
+    o = str(obozn).strip()
+    full = re.sub(r"-[^-]*$", "", base) + o if (o.startswith("-") and base) else o
+    m = re.search(r"-(\d+)(_д\d*)?$", full)
+    length = int(m.group(1)) if m else None
+    dorab = m.group(2) if (m and m.group(2)) else ""
+    return full, length, dorab
 
 
-def extract_length(obozn: str):
-    """Длина детали из суффикса обозначения: ...065-2750 -> 2750."""
-    m = re.search(r"-(\d+)(?:_д)?$", str(obozn).strip())
-    return int(m.group(1)) if m else None
-
-
-def extract_grade(obozn_mat: str, primech: str):
-    """
-    Марка стали. Приоритет: явная марка в обозначении материала ($$...;МАРКА...$$),
-    затем колонка примечания (С255/С345), затем 'Сталь 10' и т.п.
-    """
-    t = str(obozn_mat)
-    # внутри $$...$$ марка обычно после ';'
+def extract_grade(obozn_mat):
+    t = str(obozn_mat).strip()
     m = re.search(r";\s*([0-9]{0,2}[А-ЯA-Z][\w\-]+)\s+ГОСТ", t)
     if m:
         return m.group(1).strip()
-    # 'Сталь 10 ГОСТ...' без $$
+    m = re.search(r"^(С\d{3})\s+ГОСТ", t)
+    if m:
+        return m.group(1)
     m = re.search(r"Сталь\s+(\d+\w*)", t)
     if m:
         return f"Сталь{m.group(1)}"
     return ""
 
 
-def main(src_xls: str, out_xlsx: str):
+def grade_from_note(primech):
+    """Запасной источник марки: класс прочности в примечании, напр. 'С255-4' -> 'С255'."""
+    m = re.search(r"(С\d{3})", str(primech))
+    return m.group(1) if m else ""
+
+
+def material_size(obozn_mat):
+    m = re.search(r"d?(\d+х\d+х\d+|\d+х\d+|\d+[ПУпу])", str(obozn_mat))
+    return normalize_size(m.group(1)) if m else ""
+
+
+def detect_layout(df):
+    """Определяет колонки количества, обозначения материала/примечания, исполнения."""
+    hdr = [str(df.iloc[0, c]).strip() for c in range(df.shape[1])]
+    kol_cols = [c for c, h in enumerate(hdr) if h == "Количество"]
+    # колонка сортамента ("Обозначение материала"), если есть
+    mat_col = None
+    for c, h in enumerate(hdr):
+        if "материал" in h.lower():
+            mat_col = c
+    # колонка примечания (запасной источник марки: С255-4)
+    prim_col = None
+    for c, h in enumerate(hdr):
+        if h.lower().startswith("примеч"):
+            prim_col = c
+    ispoln = {}
+    if len(kol_cols) > 1:
+        for i in range(1, 6):
+            if i < len(df) and "исполн" in str(df.iloc[i, 4]).lower():
+                for c in kol_cols:
+                    v = str(df.iloc[i, c]).strip()
+                    if v and v.lower() != "nan":
+                        ispoln[c] = v
+                break
+    if not ispoln:
+        ispoln = {kol_cols[0]: ""}
+    return ispoln, mat_col, prim_col
+
+
+def main(src_xls, out_xlsx):
     df = pd.read_excel(src_xls, sheet_name=0, header=None, dtype=str)
-    df.columns = ["Формат", "Зона", "Позиция", "Обозначение", "Наименование",
-                  "Количество", "Примечание", "Масса", "БЦО", "Обозн_СТ",
-                  "Вид", "IDФГ", "IDPart", "ОКП", "IDмат", "ОбознМат"][:df.shape[1]]
+    ispoln, mat_col, prim_col = detect_layout(df)
+    has_isp = any(v for v in ispoln.values())
 
-    rows = df[df["Позиция"].notna() & df["Позиция"].astype(str).str.match(r"^\d+$", na=False)]
+    rows = df[df[2].notna() & df[2].astype(str).str.match(r"^\d+$", na=False)]
 
-    parts = []        # для листа "Детали"
-    materials = {}     # code -> dict (для листа "Материалы")
-    checks = []        # для листа "Проверка"
-    cut_off = []       # отсечённые листы/2D
+    parts, materials, checks, cut_off = [], {}, [], []
+    base_desig = ""
 
     for _, r in rows.iterrows():
-        naim = str(r["Наименование"]).strip()
-        obozn = str(r["Обозначение"]).strip()
-        qty = int(float(str(r["Количество"]).replace(",", "."))) if str(r["Количество"]).strip() else 0
-        pos = str(r["Позиция"]).strip()
+        naim = str(r[4]).strip()
+        obozn_raw = str(r[3]).strip()
+        pos = str(r[2]).strip()
+        obozn_mat = r[mat_col] if mat_col is not None else ""
+        primech = r[prim_col] if prim_col is not None else ""
 
-        # --- отсечь 2D (листы/пластины) ---
+        if obozn_raw and not obozn_raw.startswith("-") and obozn_raw.lower() != "nan":
+            base_desig = obozn_raw
+
         if any(k in naim for k in SHEET_KEYWORDS) and "Труба" not in naim:
-            cut_off.append([pos, obozn, naim, qty, "листовой/2D — линейный раскрой неприменим"])
+            cut_off.append([pos, obozn_raw, naim, "не линейный прокат (лист/крепёж/прочее)"])
             continue
-
         profile_type, size = classify_profile(naim)
-        length = extract_length(obozn)
-        grade = extract_grade(r["ОбознМат"], r["Примечание"])
-
-        # --- проверки для человека ---
-        warn = []
         if profile_type is None:
-            cut_off.append([pos, obozn, naim, qty, "не распознан профиль — проверить вручную"])
+            cut_off.append([pos, obozn_raw, naim, "не распознан профиль — проверить вручную"])
             continue
-        if length is None:
-            warn.append("длина не извлечена из обозначения")
-        if not grade:
-            warn.append("марка стали не определена — заполнить вручную")
 
-        # ловушка: наименование швеллера расходится с обозначением материала
-        if profile_type == "Швеллер":
-            m_mat = re.search(r"d?(\d+П)", str(r["ОбознМат"]))
-            if m_mat and size and m_mat.group(1) != size:
-                warn.append(f"конфликт: наимен.='{size}', материал='{m_mat.group(1)}'")
-                size = m_mat.group(1)  # доверяем обозначению материала
+        full_desig, length, dorab = parse_designation(obozn_raw, base_desig)
+        grade = extract_grade(obozn_mat) or grade_from_note(primech)
+
+        warn = []
+        if length is None:
+            warn.append("длина не извлечена")
+        if not grade:
+            warn.append("марка не определена")
+        msize = material_size(obozn_mat)
+        conflict = ""
+        if profile_type == "Швеллер" and msize and size and msize != size:
+            conflict = f"размер: наимен.='{size}' / сортамент='{msize}'"
+            size = msize
+        elif profile_type == "Труба профильная" and msize and size and msize != size:
+            conflict = f"размер: наимен.='{size}' / сортамент='{msize}' (возможна опечатка)"
+        if conflict:
+            warn.append(conflict)
 
         prefix = PROFILE_MAP.get(profile_type, "")
         code = f"{prefix}-{size}-{grade.upper()}" if (prefix and size and grade) else ""
 
-        if warn:
-            checks.append([pos, obozn, naim, size, grade, length, qty, "; ".join(warn)])
+        # разворот по исполнениям: одна строка на каждое исполнение с кол-вом
+        for col, isp in ispoln.items():
+            qv = str(r[col]).strip()
+            if qv in ("", "nan", "None"):
+                continue
+            try:
+                qty = int(float(qv.replace(",", ".")))
+            except ValueError:
+                continue
+            note_parts = []
+            if isp:
+                note_parts.append(f"исп.{isp}")
+            if dorab:
+                note_parts.append(f"доработка{dorab}")
+            note = " ".join(note_parts)
 
-        parts.append({
-            "Обозначение": obozn, "Наименование детали": naim,
-            "Код материала": code, "Длина, мм": length or "", "Количество": qty,
-            "Узел": "", "Примечание": "; ".join(warn),
-        })
+            if warn:
+                checks.append([pos, full_desig, naim, isp or "-", size, grade,
+                               length if length else "", qty, "; ".join(warn)])
+            parts.append({
+                "Обозначение": full_desig, "Наименование детали": naim, "Код материала": code,
+                "Длина, мм": length if length else "", "Количество": qty,
+                "Исполнение": isp, "Доработка": dorab, "Примечание": note,
+                "_conflict": bool(conflict),
+            })
+            if code and code not in materials:
+                materials[code] = {
+                    "Код материала": code, "Наименование": f"{profile_type} {size} {grade}",
+                    "Тип профиля": profile_type, "Размер": size, "Марка": grade,
+                    "Длина хлыста, мм": STOCK_LENGTH_DEFAULT.get(prefix, 6000),
+                    "Кол-во хлыстов": 0, "Примечание": "",
+                }
 
-        if code and code not in materials:
-            materials[code] = {
-                "Код материала": code,
-                "Наименование": f"{profile_type} {size} {grade}",
-                "Тип профиля": profile_type, "Размер": size, "Марка": grade,
-                "Длина хлыста, мм": STOCK_LENGTH_DEFAULT.get(prefix, 6000),
-                "Кол-во хлыстов": 0, "Примечание": "",
-            }
-
-    write_workbook(out_xlsx, parts, list(materials.values()), checks, cut_off)
-    print(f"Деталей (линейный прокат): {len(parts)}")
+    write_workbook(out_xlsx, parts, list(materials.values()), checks, cut_off, has_isp)
+    print(f"Исполнений в файле: {len([v for v in ispoln.values() if v]) or 1}"
+          f"{' (' + ', '.join(v for v in ispoln.values() if v) + ')' if has_isp else ' (без исполнений)'}")
+    print(f"Деталей-строк (после разворота): {len(parts)}")
     print(f"Уникальных материалов: {len(materials)}")
-    print(f"Строк с пометками для проверки: {len(checks)}")
-    print(f"Отсечено (листы/2D/непонятное): {len(cut_off)}")
+    print(f"Строк с пометками: {len(checks)}")
+    print(f"Отсечено: {len(cut_off)}")
 
 
-def write_workbook(path, parts, materials, checks, cut_off):
+def write_workbook(path, parts, materials, checks, cut_off, has_isp):
     wb = Workbook()
     H = Font(bold=True, color="FFFFFF", name="Arial")
     HF = PatternFill("solid", fgColor="1F4E78")
-    WARN = PatternFill("solid", fgColor="FFF2CC")
-    thin = Side(style="thin", color="BBBBBB")
-    BORD = Border(thin, thin, thin, thin)
 
-    def style_header(ws, ncol):
-        for c in range(1, ncol + 1):
-            cell = ws.cell(row=1, column=c)
-            cell.font = H; cell.fill = HF; cell.border = BORD
+    def style_header(ws, names, row=1):
+        for c, name in enumerate(names, 1):
+            cell = ws.cell(row=row, column=c, value=name)
+            cell.font = H; cell.fill = HF
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    # --- Детали ---
+    # ===== Лист Детали со светофором =====
     ws = wb.active; ws.title = "Детали"
-    cols = ["Обозначение", "Наименование детали", "Код материала", "Длина, мм", "Количество", "Узел", "Примечание"]
-    ws.append(cols); style_header(ws, len(cols))
+    cols = ["Обозначение", "Наименование детали", "Код материала", "Длина, мм",
+            "Количество", "Исполнение", "Доработка", "Примечание"]
+    n = len(cols)
+    status_col = n + 1
+    sc = chr(64 + status_col)
+    data_first = 4
+    data_last = 4 + max(len(parts) - 1, 0)
+
+    cnt_formula = f'=COUNTIF(${sc}{data_first}:${sc}{data_last},"⚠ заполнить")'
+    ws.cell(row=1, column=1, value="НЕ ЗАПОЛНЕНО:").font = Font(bold=True, name="Arial")
+    ws.cell(row=1, column=3, value=cnt_formula).font = Font(bold=True, size=12, name="Arial")
+    verdict = ('=IF($C$1=0,"✓ ВСЁ ЗАПОЛНЕНО — можно считать раскрой",'
+               '"✗ ЗАПОЛНИТЕ строки со статусом ⚠ (Длина и Код материала)")')
+    vc = ws.cell(row=1, column=4, value=verdict)
+    vc.font = Font(bold=True, size=12, name="Arial")
+    ws.merge_cells(start_row=1, start_column=4, end_row=1, end_column=status_col)
+
+    for c, name in enumerate(cols + ["Статус"], 1):
+        cell = ws.cell(row=3, column=c, value=name)
+        cell.font = H; cell.fill = HF
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    r = data_first
     for p in parts:
-        ws.append([p[c] for c in cols])
-        if p["Примечание"]:
-            for c in range(1, len(cols) + 1):
-                ws.cell(row=ws.max_row, column=c).fill = WARN
-    widths = [24, 26, 26, 11, 12, 10, 38]
-    for i, w in enumerate(widths, 1):
+        for c, name in enumerate(cols, 1):
+            ws.cell(row=r, column=c, value=p[name])
+        # статус: заполнить / доработка / готова  (по заполненности кода и длины)
+        st = (f'=IF(OR($C{r}="",$D{r}=""),"⚠ заполнить",'
+              f'IF($G{r}<>"","● доработка","✓ готова"))')
+        ws.cell(row=r, column=status_col, value=st)
+        r += 1
+    data_last_real = r - 1
+
+    if parts:
+        rng = f"A4:{sc}{data_last_real}"
+        red = PatternFill("solid", fgColor="FFC7CE")
+        peach = PatternFill("solid", fgColor="FCE4D6")
+        green = PatternFill("solid", fgColor="E2EFDA")
+        # красный — нужно заполнить (нет кода или длины)
+        ws.conditional_formatting.add(rng, FormulaRule(formula=['OR($C4="",$D4="")'], fill=red, stopIfTrue=True))
+        # персик — доработка (заполнено, но требует внимания)
+        ws.conditional_formatting.add(rng, FormulaRule(formula=['$G4<>""'], fill=peach, stopIfTrue=True))
+        # зелёный — всё ок
+        ws.conditional_formatting.add(rng, FormulaRule(formula=['AND($C4<>"",$D4<>"")'], fill=green))
+
+    for i, w in enumerate([26, 22, 26, 10, 11, 11, 11, 24, 13], 1):
         ws.column_dimensions[chr(64 + i)].width = w
 
-    # --- Материалы ---
+    # ===== Материалы =====
     ws2 = wb.create_sheet("Материалы")
-    cols2 = ["Код материала", "Наименование", "Тип профиля", "Размер", "Марка", "Длина хлыста, мм", "Кол-во хлыстов", "Примечание"]
-    ws2.append(cols2); style_header(ws2, len(cols2))
+    cols2 = ["Код материала", "Наименование", "Тип профиля", "Размер", "Марка",
+             "Длина хлыста, мм", "Кол-во хлыстов", "Примечание"]
+    style_header(ws2, cols2)
     for m in materials:
         ws2.append([m.get(c, "") for c in cols2])
     for i, w in enumerate([26, 30, 18, 12, 12, 16, 14, 20], 1):
         ws2.column_dimensions[chr(64 + i)].width = w
 
-    # --- Проверка ---
+    # ===== Проверка =====
     ws3 = wb.create_sheet("Проверка")
-    cols3 = ["Позиция", "Обозначение", "Наименование", "Размер", "Марка", "Длина, мм", "Кол-во", "Что проверить"]
-    ws3.append(cols3); style_header(ws3, len(cols3))
+    cols3 = ["Позиция", "Обозначение", "Наименование", "Исп.", "Размер", "Марка",
+             "Длина, мм", "Кол-во", "Что проверить"]
+    style_header(ws3, cols3)
+    peach = PatternFill("solid", fgColor="FCE4D6")
+    warn = PatternFill("solid", fgColor="FFF2CC")
     for row in checks:
         ws3.append(row)
-        for c in range(1, len(cols3) + 1):
-            ws3.cell(row=ws3.max_row, column=c).fill = WARN
-    for i, w in enumerate([10, 24, 22, 12, 12, 11, 9, 44], 1):
+    for i, w in enumerate([8, 24, 20, 7, 11, 11, 10, 7, 46], 1):
         ws3.column_dimensions[chr(64 + i)].width = w
 
-    # --- Отсечено ---
+    # ===== Отсечено =====
     ws4 = wb.create_sheet("Отсечено")
-    cols4 = ["Позиция", "Обозначение", "Наименование", "Кол-во", "Причина"]
-    ws4.append(cols4); style_header(ws4, len(cols4))
+    cols4 = ["Позиция", "Обозначение", "Наименование", "Причина"]
+    style_header(ws4, cols4)
     for row in cut_off:
         ws4.append(row)
-    for i, w in enumerate([10, 26, 26, 9, 44], 1):
+    for i, w in enumerate([8, 26, 26, 44], 1):
         ws4.column_dimensions[chr(64 + i)].width = w
 
     wb.save(path)
