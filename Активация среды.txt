@@ -1,0 +1,3 @@
+cd C:\raskroy
+venv\Scripts\activate
+python raskroy.py "спецификация.xls"
