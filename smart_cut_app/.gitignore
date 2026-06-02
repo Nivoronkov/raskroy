@@ -1,0 +1,27 @@
+# Виртуальная среда
+.venv/
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+
+# Служебные файлы VS Code
+.vscode/
+
+# Сборки и временные файлы
+build/
+dist/
+*.spec
+
+# Логи и временные файлы
+*.log
+*.tmp
+
+# Пользовательские данные и экспорт
+user_data/
+exports/
+temp/
+
+# Системные файлы Windows
+Thumbs.db
+Desktop.ini
