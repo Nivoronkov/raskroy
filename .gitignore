@@ -22,6 +22,9 @@ __pycache__/
 smart_cut_app/materials_catalog.json
 smart_cut_app/leftovers_db.json
 smart_cut_app/app_config.json
+build/
+dist/
+*.exe
 
 # --- бэкапы наших правок (не нужны в репозитории) ---
 *_BAK.py
