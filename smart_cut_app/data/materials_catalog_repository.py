@@ -1,7 +1,10 @@
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.app_config import get_catalog_path
 from core.models import MaterialCatalogItem
 from core.normalization import (
     PROFILE_TYPE_MAP,
@@ -16,7 +19,15 @@ class MaterialsCatalogError(Exception):
     pass
 
 
-DEFAULT_CATALOG_FILE = "materials_catalog.json"
+# Путь к справочнику берётся из конфига приложения (может указывать на сетевую
+# папку — общий склад для нескольких рабочих мест). Используем сентинел: если
+# вызывающий код не передал file_path, путь разрешается из конфига в момент
+# вызова (а не один раз при импорте — чтобы смена пути в настройках подхватывалась).
+_USE_CONFIG = None
+
+
+def _resolve(file_path):
+    return get_catalog_path() if file_path is _USE_CONFIG else file_path
 
 
 def generate_material_code(profile_type: str, size: str, steel_grade: str) -> str:
@@ -68,9 +79,9 @@ def _item_from_dict(data: Dict[str, Any]) -> MaterialCatalogItem:
 
 
 def load_materials_catalog(
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
 ) -> List[MaterialCatalogItem]:
-    path = Path(file_path)
+    path = Path(_resolve(file_path))
     if not path.exists():
         return []
 
@@ -89,22 +100,39 @@ def load_materials_catalog(
 
 def save_materials_catalog(
     items: List[MaterialCatalogItem],
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
 ) -> None:
+    """
+    Сохраняет справочник АТОМАРНО: пишет во временный файл в той же папке и
+    затем заменяет им основной (os.replace — атомарная операция). Так читающие
+    рабочие места никогда не увидят полузаписанный файл, а сбой при записи не
+    повредит существующий справочник. Это важно для общего справочника в сети,
+    который редактируют несколько человек.
+    """
+    target = _resolve(file_path)
+    target_dir = os.path.dirname(os.path.abspath(target))
     try:
-        with open(file_path, "w", encoding="utf-8") as file:
-            json.dump(
-                [_item_to_dict(item) for item in items],
-                file,
-                ensure_ascii=False,
-                indent=2,
-            )
+        os.makedirs(target_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=target_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                json.dump(
+                    [_item_to_dict(item) for item in items],
+                    file,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            os.replace(tmp_path, target)  # атомарная подмена
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
     except OSError as exc:
         raise MaterialsCatalogError(f"Не удалось сохранить справочник материалов:\n{exc}") from exc
 
 
 def get_next_catalog_item_id(
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
 ) -> str:
     items = load_materials_catalog(file_path)
     numbers = []
@@ -124,7 +152,7 @@ def find_duplicate_catalog_item(
     size: str,
     steel_grade: str,
     stock_length_mm: int,
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
     exclude_id: str = "",
 ) -> Optional[MaterialCatalogItem]:
     """
@@ -152,7 +180,7 @@ def find_duplicate_catalog_item(
 
 def find_catalog_item_by_code(
     material_code: str,
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
 ) -> Optional[MaterialCatalogItem]:
     """Поиск материала по точному коду (коды уже канонические)."""
     code = (material_code or "").strip()
@@ -166,7 +194,7 @@ def find_catalog_item_by_code(
 
 def add_catalog_item(
     item: MaterialCatalogItem,
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
 ) -> None:
     items = load_materials_catalog(file_path)
     items.append(item)
@@ -175,7 +203,7 @@ def add_catalog_item(
 
 def update_catalog_item(
     updated_item: MaterialCatalogItem,
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
 ) -> None:
     items = load_materials_catalog(file_path)
 
@@ -196,7 +224,7 @@ def update_catalog_item(
 
 def delete_catalog_items_by_ids(
     item_ids: List[str],
-    file_path: str = DEFAULT_CATALOG_FILE,
+    file_path=_USE_CONFIG,
 ) -> int:
     if not item_ids:
         return 0

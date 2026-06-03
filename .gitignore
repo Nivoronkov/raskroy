@@ -21,6 +21,7 @@ __pycache__/
 # --- справочники: НЕ коммитим (формируются при запуске, ведутся общим файлом в сети) ---
 smart_cut_app/materials_catalog.json
 smart_cut_app/leftovers_db.json
+smart_cut_app/app_config.json
 
 # --- бэкапы наших правок (не нужны в репозитории) ---
 *_BAK.py

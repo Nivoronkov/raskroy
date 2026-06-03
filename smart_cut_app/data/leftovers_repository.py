@@ -1,7 +1,10 @@
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.app_config import get_leftovers_path
 from core.models import Leftover
 
 
@@ -9,7 +12,13 @@ class LeftoversRepositoryError(Exception):
     pass
 
 
-DEFAULT_LEFTOVERS_FILE = "leftovers_db.json"
+# Путь к базе остатков берётся из конфига (может быть общим в сетевой папке).
+# Сентинел: если file_path не передан, путь разрешается из конфига при вызове.
+_USE_CONFIG = None
+
+
+def _resolve(file_path):
+    return get_leftovers_path() if file_path is _USE_CONFIG else file_path
 
 
 def _leftover_to_dict(leftover: Leftover) -> Dict[str, Any]:
@@ -36,8 +45,8 @@ def _leftover_from_dict(data: Dict[str, Any]) -> Leftover:
     )
 
 
-def load_leftovers(file_path: str = DEFAULT_LEFTOVERS_FILE) -> List[Leftover]:
-    path = Path(file_path)
+def load_leftovers(file_path=_USE_CONFIG) -> List[Leftover]:
+    path = Path(_resolve(file_path))
     if not path.exists():
         return []
 
@@ -56,23 +65,34 @@ def load_leftovers(file_path: str = DEFAULT_LEFTOVERS_FILE) -> List[Leftover]:
 
 def save_leftovers(
     leftovers: List[Leftover],
-    file_path: str = DEFAULT_LEFTOVERS_FILE,
+    file_path=_USE_CONFIG,
 ) -> None:
+    """Атомарная запись (временный файл + os.replace) — как у справочника."""
+    target = _resolve(file_path)
+    target_dir = os.path.dirname(os.path.abspath(target))
     try:
-        with open(file_path, "w", encoding="utf-8") as file:
-            json.dump(
-                [_leftover_to_dict(item) for item in leftovers],
-                file,
-                ensure_ascii=False,
-                indent=2,
-            )
+        os.makedirs(target_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=target_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                json.dump(
+                    [_leftover_to_dict(item) for item in leftovers],
+                    file,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            os.replace(tmp_path, target)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
     except OSError as exc:
         raise LeftoversRepositoryError(f"Не удалось сохранить базу остатков:\n{exc}") from exc
 
 
 def append_leftovers(
     new_leftovers: List[Leftover],
-    file_path: str = DEFAULT_LEFTOVERS_FILE,
+    file_path=_USE_CONFIG,
 ) -> None:
     existing = load_leftovers(file_path)
     existing.extend(new_leftovers)
@@ -81,7 +101,7 @@ def append_leftovers(
 
 def delete_leftovers_by_ids(
     leftover_ids: List[str],
-    file_path: str = DEFAULT_LEFTOVERS_FILE,
+    file_path=_USE_CONFIG,
 ) -> int:
     if not leftover_ids:
         return 0
@@ -97,7 +117,7 @@ def delete_leftovers_by_ids(
 def apply_leftovers_result(
     consumed_leftover_ids: List[str],
     new_leftovers: List[Leftover],
-    file_path: str = DEFAULT_LEFTOVERS_FILE,
+    file_path=_USE_CONFIG,
 ) -> Dict[str, int]:
     existing = load_leftovers(file_path)
 
@@ -121,7 +141,7 @@ def apply_leftovers_result(
 
 def add_leftover(
     leftover: Leftover,
-    file_path: str = DEFAULT_LEFTOVERS_FILE,
+    file_path=_USE_CONFIG,
 ) -> None:
     existing = load_leftovers(file_path)
     existing.append(leftover)
@@ -130,7 +150,7 @@ def add_leftover(
 
 def update_leftover(
     updated_leftover: Leftover,
-    file_path: str = DEFAULT_LEFTOVERS_FILE,
+    file_path=_USE_CONFIG,
 ) -> None:
     existing = load_leftovers(file_path)
 

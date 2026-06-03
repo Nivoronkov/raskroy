@@ -62,6 +62,56 @@ class MainWindow(QMainWindow):
         menu.addAction(open_action)
         menu.addAction(save_action)
 
+        # --- Настройки ---
+        settings_menu = self.menuBar().addMenu("Настройки")
+        catalog_path_action = QAction("Путь к справочнику материалов…", self)
+        catalog_path_action.triggered.connect(self.configure_catalog_path)
+        settings_menu.addAction(catalog_path_action)
+
+    def configure_catalog_path(self) -> None:
+        """
+        Позволяет задать путь к справочнику материалов — например, общий файл в
+        сетевой папке (\\\\сервер\\sklad\\materials_catalog.json или Z:\\...).
+        """
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from core import app_config
+
+        current = app_config.get_catalog_path()
+        default = app_config.get_default_catalog_path()
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Путь к справочнику материалов")
+        msg.setText(
+            f"Текущий справочник:\n{current}\n\n"
+            "Выбрать общий справочник (например, в сетевой папке) или вернуть "
+            "справочник по умолчанию рядом с программой?"
+        )
+        choose_btn = msg.addButton("Выбрать файл…", QMessageBox.ButtonRole.AcceptRole)
+        default_btn = msg.addButton("По умолчанию", QMessageBox.ButtonRole.ResetRole)
+        msg.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is choose_btn:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Выберите файл справочника материалов",
+                current if current else default,
+                "Справочник (*.json);;Все файлы (*.*)",
+            )
+            if path:
+                app_config.set_catalog_path(path)
+                QMessageBox.information(
+                    self, "Готово",
+                    f"Справочник материалов теперь:\n{path}",
+                )
+        elif clicked is default_btn:
+            app_config.set_catalog_path(None)
+            QMessageBox.information(
+                self, "Готово",
+                f"Возвращён справочник по умолчанию:\n{default}",
+            )
+
     def _create_statusbar(self) -> None:
         self.statusBar().showMessage("Автор: Воронков Н.А.")
 
