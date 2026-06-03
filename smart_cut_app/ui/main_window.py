@@ -110,6 +110,11 @@ class MainWindow(QMainWindow):
 
             materials = self._build_project_materials_from_parts(parts)
 
+            # Составные детали (длиннее хлыста): предложить оператору разделить.
+            parts = self._handle_oversized_parts(parts, materials)
+            if parts is None:
+                return  # оператор отменил
+
             result = calculate_cutting(materials, parts, settings)
 
             self.results_tab.show_result(result)
@@ -122,6 +127,53 @@ class MainWindow(QMainWindow):
                 "Ошибка",
                 f"Произошла непредвиденная ошибка:\n{exc}",
             )
+
+    def _handle_oversized_parts(self, parts, materials):
+        """
+        Находит детали длиннее хлыста и предлагает разделить каждую через диалог.
+        Возвращает обновлённый список деталей или None, если оператор отменил.
+        """
+        from core.part_splitting import build_split_parts
+        from ui.split_part_dialog import SplitPartDialog
+
+        stock_by_code = {m.code: m.stock_length_mm for m in materials}
+
+        oversized = [
+            p for p in parts
+            if p.length_mm > stock_by_code.get(p.material_code, p.length_mm)
+            and p.part_index == 0  # ещё не разделённая
+        ]
+        if not oversized:
+            return parts
+
+        splits = {}  # part_id -> длины частей
+        for p in oversized:
+            stock = stock_by_code.get(p.material_code, p.length_mm)
+            dlg = SplitPartDialog(p.name, p.material_code, p.length_mm, stock, self)
+            if dlg.exec() != dlg.DialogCode.Accepted or not dlg.result_lengths:
+                # оператор не разделил эту деталь — спросим, продолжать ли без неё
+                resp = QMessageBox.question(
+                    self,
+                    "Деталь не разделена",
+                    f"Деталь «{p.name}» ({p.length_mm} мм) не разделена и не войдёт "
+                    f"в раскрой. Продолжить расчёт без неё?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if resp != QMessageBox.StandardButton.Yes:
+                    return None
+                continue
+            splits[p.id] = dlg.result_lengths
+
+        if not splits:
+            return parts
+
+        new_parts = []
+        for p in parts:
+            if p.id in splits:
+                new_parts.extend(build_split_parts(p, splits[p.id]))
+            else:
+                new_parts.append(p)
+        return new_parts
 
     def compare_modes(self) -> None:
         try:
@@ -237,7 +289,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            parts, missing, info = import_specification(file_path)
+            parts, missing, info, missing_cards = import_specification(file_path)
 
             self.parts_tab.set_parts(parts)
             self.results_tab.clear_results()
@@ -245,7 +297,24 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentWidget(self.parts_tab)
 
             if missing:
-                QMessageBox.warning(self, "Спецификация загружена — нужны материалы", info)
+                # быстрое добавление недостающих материалов на склад в один проход
+                if missing_cards:
+                    from ui.quick_add_materials_dialog import QuickAddMaterialsDialog
+                    dlg = QuickAddMaterialsDialog(missing_cards, self)
+                    dlg.exec()
+                    if dlg.added_count:
+                        # обновим список материалов с учётом пополненного справочника
+                        self.materials_tab.build_from_parts(parts, None)
+                        QMessageBox.information(
+                            self,
+                            "Склад пополнен",
+                            f"Добавлено материалов на склад: {dlg.added_count}.\n"
+                            "Теперь они опознаются при расчёте раскроя.",
+                        )
+                else:
+                    QMessageBox.warning(
+                        self, "Спецификация загружена — нужны материалы", info
+                    )
             else:
                 QMessageBox.information(self, "Спецификация загружена", info)
 

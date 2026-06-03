@@ -1,4 +1,32 @@
-from typing import List, Optional, Tuple
+"""
+Оптимизатор раскроя линейного проката.
+
+Версия 2 — заполнение хлыста ПОДБОРОМ КОМБИНАЦИИ деталей (subset-sum),
+а не пошаговой жадностью (First-Fit Decreasing). Это даёт раскрой
+уровня веб-калькуляторов: на тесте трубы 100х100х5 — 17 хлыстов вместо 18.
+
+Публичный контракт не изменился:
+    optimize_group(group, settings, available_leftovers=None) -> List[CuttingPattern]
+
+Как работает:
+  1. Для каждой ЗАГОТОВКИ (сначала доступные остатки, затем новые хлысты)
+     методом динамического программирования подбирается набор деталей,
+     максимально плотно заполняющий её длину с учётом ширины реза.
+  2. Заготовка «забивается», выбранные детали удаляются из очереди, и так
+     до тех пор, пока все детали не размещены.
+
+Ширина реза (settings.cut_width_mm) учитывается честно: каждая деталь
+занимает (длина + рез). Параметр настраивается из GUI (бывает 0, бывает 5–10 мм).
+
+Режимы оптимизации:
+  - min_waste / balanced — максимально плотное заполнение каждой заготовки
+    (минимум суммарного отхода).
+  - min_bars — то же плотное заполнение; цель «меньше хлыстов» достигается
+    тем же подбором (плотная укладка = меньше заготовок).
+  - max_leftovers — сначала максимально расходуем имеющиеся остатки, затем
+    новые хлысты.
+"""
+from typing import Dict, List, Optional, Tuple
 
 from core.grouping import PreparedGroup
 from core.models import CalculationSettings, CuttingPattern, ExpandedPart, Leftover
@@ -6,75 +34,74 @@ from core.models import CalculationSettings, CuttingPattern, ExpandedPart, Lefto
 
 DEBUG_OPTIMIZER = False
 
+# Предел числа состояний DP на одну заготовку (защита от комбинаторного взрыва
+# при большом числе разнодлинных деталей). При превышении оставляем состояния,
+# наиболее близкие к полному заполнению.
+_DP_STATE_LIMIT = 50000
+
 
 def _log(message: str) -> None:
     if DEBUG_OPTIMIZER:
         print(message)
 
 
-def _calculate_additional_length(
-    pattern: CuttingPattern,
-    part: ExpandedPart,
+def _occupied_length(part: ExpandedPart, settings: CalculationSettings) -> int:
+    """Сколько длины заготовки занимает одна деталь: её рабочая длина + один рез."""
+    return part.effective_length_mm + settings.cut_width_mm
+
+
+def _best_fill(
+    parts: List[ExpandedPart],
+    capacity: int,
     settings: CalculationSettings,
-) -> int:
+) -> List[int]:
     """
-    Каждая деталь учитывается вместе с одним резом.
+    Подбирает индексы деталей из `parts`, максимально плотно заполняющих
+    заготовку длиной `capacity`. Возвращает список индексов в `parts`.
+
+    DP по достижимой занятой длине: reachable[used] = список индексов деталей.
+    Цель — максимальный used <= capacity.
     """
-    return settings.cut_width_mm + part.effective_length_mm
+    reachable: Dict[int, List[int]] = {0: []}
+
+    for idx, part in enumerate(parts):
+        need = _occupied_length(part, settings)
+        if need > capacity:
+            continue  # одна деталь не влезает в эту заготовку — пропускаем
+
+        additions: Dict[int, List[int]] = {}
+        for used, chosen in reachable.items():
+            new_used = used + need
+            if new_used <= capacity and new_used not in reachable and new_used not in additions:
+                additions[new_used] = chosen + [idx]
+
+        if additions:
+            reachable.update(additions)
+
+        if len(reachable) > _DP_STATE_LIMIT:
+            keep_keys = sorted(reachable.keys(), reverse=True)[:_DP_STATE_LIMIT]
+            reachable = {k: reachable[k] for k in keep_keys}
+            if 0 not in reachable:
+                reachable[0] = []
+
+    best_used = max(reachable.keys())
+    return reachable[best_used]
 
 
-def _can_fit_part(
-    pattern: CuttingPattern,
-    part: ExpandedPart,
-    settings: CalculationSettings,
-) -> bool:
-    additional_length = _calculate_additional_length(pattern, part, settings)
-    return pattern.used_length_mm + additional_length <= pattern.stock_length_mm
-
-
-def _add_part_to_pattern(
-    pattern: CuttingPattern,
-    part: ExpandedPart,
-    settings: CalculationSettings,
-) -> None:
-    additional_length = _calculate_additional_length(pattern, part, settings)
-
-    pattern.cuts_count += 1
-    pattern.parts.append(part)
-    pattern.used_length_mm += additional_length
-    pattern.leftover_length_mm = pattern.stock_length_mm - pattern.used_length_mm
-
-
-def _build_pattern_key(pattern: CuttingPattern) -> str:
-    lengths = [str(part.base_length_mm) for part in pattern.parts]
-    return "|".join(lengths)
-
-
-def _finalize_pattern(
-    pattern: CuttingPattern,
-    settings: CalculationSettings,
-) -> None:
-    if pattern.leftover_length_mm >= settings.min_useful_leftover_mm:
-        pattern.leftover_type = "Полезный остаток"
-    else:
-        pattern.leftover_type = "Отход"
-
-    pattern.pattern_key = _build_pattern_key(pattern)
-
-
-def _create_empty_pattern(
+def _new_pattern_for_stock(
     group: PreparedGroup,
+    stock_length_mm: int,
     pattern_index: int,
 ) -> CuttingPattern:
     return CuttingPattern(
         id=f"PATTERN-{group.material.code}-{pattern_index}",
         material_code=group.material.code,
         material_name=group.material.name,
-        stock_length_mm=group.material.stock_length_mm,
+        stock_length_mm=stock_length_mm,
         parts=[],
         cuts_count=0,
         used_length_mm=0,
-        leftover_length_mm=group.material.stock_length_mm,
+        leftover_length_mm=stock_length_mm,
         leftover_type="Отход",
         pattern_key="",
         source_type="new",
@@ -82,10 +109,7 @@ def _create_empty_pattern(
     )
 
 
-def _create_pattern_from_leftover(
-    leftover: Leftover,
-    pattern_index: int,
-) -> CuttingPattern:
+def _pattern_from_leftover(leftover: Leftover, pattern_index: int) -> CuttingPattern:
     return CuttingPattern(
         id=f"PATTERN-LEFT-{pattern_index}",
         material_code=leftover.material_code,
@@ -102,147 +126,42 @@ def _create_pattern_from_leftover(
     )
 
 
-def _remaining_length_after_add(
+def _place_parts_in_pattern(
     pattern: CuttingPattern,
-    part: ExpandedPart,
+    parts: List[ExpandedPart],
+    chosen_indices: List[int],
     settings: CalculationSettings,
-) -> int:
-    additional_length = _calculate_additional_length(pattern, part, settings)
-    return pattern.stock_length_mm - (pattern.used_length_mm + additional_length)
+) -> None:
+    """Кладёт выбранные детали в заготовку и обновляет её счётчики."""
+    for idx in chosen_indices:
+        part = parts[idx]
+        pattern.parts.append(part)
+        pattern.cuts_count += 1
+        pattern.used_length_mm += _occupied_length(part, settings)
+    pattern.leftover_length_mm = pattern.stock_length_mm - pattern.used_length_mm
 
 
-def _score_pattern(
-    pattern: CuttingPattern,
-    part: ExpandedPart,
-    settings: CalculationSettings,
-) -> Tuple:
+def _finalize_pattern(pattern: CuttingPattern, settings: CalculationSettings) -> None:
+    if pattern.leftover_length_mm >= settings.min_useful_leftover_mm:
+        pattern.leftover_type = "Полезный остаток"
+    else:
+        pattern.leftover_type = "Отход"
+    pattern.pattern_key = "|".join(str(p.base_length_mm) for p in pattern.parts)
+
+
+def _resolve_new_stock_lengths(group: PreparedGroup) -> List[int]:
     """
-    Чем меньше score, тем предпочтительнее паттерн.
+    Доступные длины новых хлыстов для материала.
+    Сейчас модель Material хранит одну длину (stock_length_mm). Если в будущем
+    появится список длин (несколько хлыстов 6 м / 12 м), достаточно вернуть его
+    отсортированным по возрастанию — алгоритм сам выберет под деталь.
     """
-    remaining_length = _remaining_length_after_add(pattern, part, settings)
-    is_leftover = 0 if pattern.source_type == "leftover" else 1
-
-    mode = settings.optimization_mode
-
-    if mode == "max_leftovers":
-        return (is_leftover, remaining_length)
-
-    if mode == "balanced":
-        return (is_leftover, remaining_length)
-
-    return (remaining_length, is_leftover)
-
-
-def _find_best_pattern(
-    candidate_patterns: List[CuttingPattern],
-    part: ExpandedPart,
-    settings: CalculationSettings,
-) -> Optional[CuttingPattern]:
-    best_pattern: Optional[CuttingPattern] = None
-    best_score: Optional[Tuple] = None
-
-    for pattern in candidate_patterns:
-        additional_length = _calculate_additional_length(pattern, part, settings)
-        will_fit = pattern.used_length_mm + additional_length <= pattern.stock_length_mm
-
-        _log(
-            f"    Проверка источника: "
-            f"{'Остаток' if pattern.source_type == 'leftover' else 'Новый хлыст'} | "
-            f"длина={pattern.stock_length_mm} | "
-            f"уже занято={pattern.used_length_mm} | "
-            f"нужно добавить={additional_length} | "
-            f"помещается={'Да' if will_fit else 'Нет'}"
-        )
-
-        if not will_fit:
-            continue
-
-        score = _score_pattern(pattern, part, settings)
-        _log(f"      score={score}")
-
-        if best_pattern is None or score < best_score:
-            best_pattern = pattern
-            best_score = score
-            _log("      -> пока лучший вариант")
-
-    return best_pattern
-
-
-def _find_best_pattern_min_bars(
-    patterns: List[CuttingPattern],
-    part: ExpandedPart,
-    settings: CalculationSettings,
-) -> Optional[CuttingPattern]:
-    """
-    Специальная логика для режима min_bars:
-    1. Сначала стараемся заполнить уже открытые НОВЫЕ хлысты
-    2. Потом пробуем остатки
-    3. И только потом открываем новый хлыст
-    """
-    opened_new_patterns = [p for p in patterns if p.source_type == "new" and p.parts]
-    leftover_patterns = [p for p in patterns if p.source_type == "leftover"]
-
-    _log("  Режим min_bars: сначала ищем среди уже открытых новых хлыстов.")
-    best_pattern = _find_best_pattern(opened_new_patterns, part, settings)
-    if best_pattern is not None:
-        _log(
-            f"  Найден уже открытый новый хлыст | длина заготовки={best_pattern.stock_length_mm}"
-        )
-        return best_pattern
-
-    _log("  В уже открытые новые хлысты не помещается, пробуем остатки.")
-    best_pattern = _find_best_pattern(leftover_patterns, part, settings)
-    if best_pattern is not None:
-        _log(
-            f"  Найден подходящий остаток | длина заготовки={best_pattern.stock_length_mm}"
-        )
-        return best_pattern
-
-    _log("  Ни открытые новые хлысты, ни остатки не подошли.")
-    return None
-
-
-def _pack_parts_into_patterns(
-    parts_to_place: List[ExpandedPart],
-    candidate_patterns: List[CuttingPattern],
-    settings: CalculationSettings,
-    create_new_pattern_fn=None,
-) -> Tuple[List[ExpandedPart], List[CuttingPattern]]:
-    """
-    Укладывает детали в существующие candidate_patterns.
-    Если create_new_pattern_fn задана, при невозможности укладки открывает новую заготовку.
-    Возвращает:
-    - список неуложенных деталей
-    - итоговый список паттернов
-    """
-    remaining_parts: List[ExpandedPart] = []
-
-    for part in parts_to_place:
-        best_pattern = _find_best_pattern(candidate_patterns, part, settings)
-
-        if best_pattern is None:
-            if create_new_pattern_fn is None:
-                remaining_parts.append(part)
-            else:
-                new_pattern = create_new_pattern_fn()
-                _add_part_to_pattern(new_pattern, part, settings)
-                candidate_patterns.append(new_pattern)
-
-                _log(
-                    f"  Деталь добавлена в новый хлыст | "
-                    f"использовано={new_pattern.used_length_mm} | "
-                    f"остаток={new_pattern.leftover_length_mm}"
-                )
-        else:
-            _add_part_to_pattern(best_pattern, part, settings)
-            _log(
-                f"  Деталь добавлена в "
-                f"{'остаток' if best_pattern.source_type == 'leftover' else 'новый хлыст'} | "
-                f"использовано={best_pattern.used_length_mm} | "
-                f"остаток={best_pattern.leftover_length_mm}"
-            )
-
-    return remaining_parts, candidate_patterns
+    extra = getattr(group.material, "stock_lengths_mm", None)
+    if extra:
+        lengths = sorted({int(x) for x in extra if int(x) > 0})
+        if lengths:
+            return lengths
+    return [group.material.stock_length_mm]
 
 
 def optimize_group(
@@ -250,130 +169,84 @@ def optimize_group(
     settings: CalculationSettings,
     available_leftovers: Optional[List[Leftover]] = None,
 ) -> List[CuttingPattern]:
+    """
+    Раскраивает все детали одной материальной группы.
+    Возвращает список заготовок (CuttingPattern) с уложенными деталями.
+    """
+    _log(f"\n=== Группа: {group.material.code} / {group.material.name} ===")
+    _log(f"Режим: {settings.optimization_mode}, рез={settings.cut_width_mm} мм")
+
+    # очередь деталей (по убыванию длины — крупные размещаем первыми)
+    remaining: List[ExpandedPart] = sorted(
+        group.expanded_parts,
+        key=lambda p: p.effective_length_mm,
+        reverse=True,
+    )
+
     patterns: List[CuttingPattern] = []
+    pattern_counter = 0
 
-    _log(f"\n=== Группа материала: {group.material.code} / {group.material.name} ===")
-    _log(f"Режим оптимизации: {settings.optimization_mode}")
-    _log(f"Учитывать остатки: {settings.use_leftovers}")
+    # ---- Этап 1: расходуем имеющиеся остатки (если включено) ----
+    use_leftovers = settings.use_leftovers or settings.optimization_mode == "max_leftovers"
+    if use_leftovers and available_leftovers:
+        # от коротких к длинным: сначала добиваем мелкие остатки
+        leftovers_sorted = sorted(available_leftovers, key=lambda l: l.length_mm)
+        for li, leftover in enumerate(leftovers_sorted, start=1):
+            if not remaining:
+                break
+            pattern = _pattern_from_leftover(leftover, li)
+            chosen = _best_fill(remaining, pattern.stock_length_mm, settings)
+            if not chosen:
+                continue
+            _place_parts_in_pattern(pattern, remaining, chosen, settings)
+            for idx in sorted(chosen, reverse=True):
+                remaining.pop(idx)
+            patterns.append(pattern)
 
-    leftover_patterns: List[CuttingPattern] = []
-    if available_leftovers:
-        available_leftovers = sorted(available_leftovers, key=lambda item: item.length_mm)
+    # ---- Этап 2: новые хлысты ----
+    stock_lengths = _resolve_new_stock_lengths(group)
 
-        _log("Доступные остатки:")
-        for leftover in available_leftovers:
+    while remaining:
+        # для каждой доступной длины хлыста подбираем заполнение, выбираем
+        # длину с наименьшим относительным отходом
+        best_choice = None  # (waste_ratio, stock_length, chosen_indices, used)
+        for stock_length in stock_lengths:
+            chosen = _best_fill(remaining, stock_length, settings)
+            if not chosen:
+                continue
+            used = sum(_occupied_length(remaining[i], settings) for i in chosen)
+            waste = stock_length - used
+            waste_ratio = waste / stock_length
+            if best_choice is None or waste_ratio < best_choice[0]:
+                best_choice = (waste_ratio, stock_length, chosen, used)
+
+        if best_choice is None:
+            # ни одна деталь не влезает ни в один доступный хлыст — защита от петли
+            biggest = max(remaining, key=lambda p: p.effective_length_mm)
             _log(
-                f"  - {leftover.id}: материал={leftover.material_code}, длина={leftover.length_mm}"
+                f"  ВНИМАНИЕ: деталь {biggest.designation or biggest.name} "
+                f"({biggest.effective_length_mm} мм) длиннее любого хлыста "
+                f"{stock_lengths} — пропущена."
             )
+            remaining.remove(biggest)
+            continue
 
-        for index, leftover in enumerate(available_leftovers, start=1):
-            leftover_patterns.append(_create_pattern_from_leftover(leftover, index))
-    else:
-        _log("Подходящих остатков нет.")
+        _, stock_length, chosen, _used = best_choice
+        pattern_counter += 1
+        pattern = _new_pattern_for_stock(group, stock_length, pattern_counter)
+        _place_parts_in_pattern(pattern, remaining, chosen, settings)
+        for idx in sorted(chosen, reverse=True):
+            remaining.pop(idx)
+        patterns.append(pattern)
 
-    # Специальный двухэтапный режим
-    if settings.optimization_mode == "max_leftovers":
-        _log("\n--- Этап 1: максимально укладываем в остатки ---")
-        parts_not_placed, used_leftover_patterns = _pack_parts_into_patterns(
-            parts_to_place=group.expanded_parts,
-            candidate_patterns=leftover_patterns,
-            settings=settings,
-            create_new_pattern_fn=None,
-        )
-
-        used_leftover_patterns = [p for p in used_leftover_patterns if p.parts]
-
-        _log("\n--- Этап 2: оставшиеся детали укладываем в новые хлысты ---")
-        new_patterns: List[CuttingPattern] = []
-
-        pattern_counter = 0
-
-        def create_new_pattern():
-            nonlocal pattern_counter
-            pattern_counter += 1
-            _log("  Открывается новый хлыст.")
-            return _create_empty_pattern(group, pattern_counter)
-
-        _, new_patterns = _pack_parts_into_patterns(
-            parts_to_place=parts_not_placed,
-            candidate_patterns=new_patterns,
-            settings=settings,
-            create_new_pattern_fn=create_new_pattern,
-        )
-
-        patterns = used_leftover_patterns + new_patterns
-
-    else:
-        patterns = list(leftover_patterns)
-
-        for part in group.expanded_parts:
-            _log(
-                f"\nОбрабатывается деталь: "
-                f"{part.designation or part.name} | "
-                f"чистая длина={part.base_length_mm} | "
-                f"расчетная длина={part.effective_length_mm + settings.cut_width_mm}"
-            )
-
-            best_pattern: Optional[CuttingPattern] = None
-
-            if settings.optimization_mode == "min_bars":
-                best_pattern = _find_best_pattern_min_bars(patterns, part, settings)
-
-            else:
-                leftover_candidates = [p for p in patterns if p.source_type == "leftover"]
-                new_candidates = [p for p in patterns if p.source_type == "new"]
-
-                _log("  Сначала ищем среди остатков.")
-                best_pattern = _find_best_pattern(leftover_candidates, part, settings)
-
-                if best_pattern is not None:
-                    _log(
-                        f"  Найден подходящий остаток | длина заготовки={best_pattern.stock_length_mm}"
-                    )
-                else:
-                    _log("  Подходящий остаток не найден, ищем среди новых хлыстов.")
-                    best_pattern = _find_best_pattern(new_candidates, part, settings)
-
-                    if best_pattern is not None:
-                        _log(
-                            f"  Найден подходящий новый хлыст | длина заготовки={best_pattern.stock_length_mm}"
-                        )
-
-            if best_pattern is None:
-                _log("  Открывается новый хлыст.")
-
-                new_pattern = _create_empty_pattern(group, len(patterns) + 1)
-                _add_part_to_pattern(new_pattern, part, settings)
-                patterns.append(new_pattern)
-
-                _log(
-                    f"  Деталь добавлена в новый хлыст | "
-                    f"использовано={new_pattern.used_length_mm} | "
-                    f"остаток={new_pattern.leftover_length_mm}"
-                )
-            else:
-                _add_part_to_pattern(best_pattern, part, settings)
-
-                _log(
-                    f"  Деталь добавлена в "
-                    f"{'остаток' if best_pattern.source_type == 'leftover' else 'новый хлыст'} | "
-                    f"использовано={best_pattern.used_length_mm} | "
-                    f"остаток={best_pattern.leftover_length_mm}"
-                )
-
-    patterns = [pattern for pattern in patterns if pattern.parts]
-
-    _log("\nИтог по группе:")
+    # ---- финализация ----
+    patterns = [p for p in patterns if p.parts]
     for pattern in patterns:
         _finalize_pattern(pattern, settings)
         _log(
-            f"  - "
-            f"{'Остаток' if pattern.source_type == 'leftover' else 'Новый хлыст'} | "
-            f"длина={pattern.stock_length_mm} | "
-            f"состав={pattern.pattern_as_text()} | "
-            f"резов={pattern.cuts_count} | "
-            f"остаток={pattern.leftover_length_mm} | "
-            f"тип={pattern.leftover_type}"
+            f"  {'Остаток' if pattern.source_type == 'leftover' else 'Хлыст'} "
+            f"{pattern.stock_length_mm} | {pattern.pattern_as_text()} | "
+            f"остаток={pattern.leftover_length_mm} | {pattern.leftover_type}"
         )
 
     return patterns

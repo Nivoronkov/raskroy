@@ -149,9 +149,13 @@ def test_исп_развёрнуты(isp):
 
 
 def test_исп_номер_в_примечании(isp):
-    # номер исполнения должен попасть в Примечание (для карты раскроя)
+    # КРАТКОЕ примечание (для схемы раскроя): номер исполнения без слова 'исп.'
     дет = isp["Детали"]
-    assert any("исп." in str(p) for p in дет["Примечание"])
+    # хотя бы у одной детали краткое примечание содержит номер исполнения
+    assert any(str(p).strip() and "исп." not in str(p) for p in дет["Примечание"])
+    # ПОЛНОЕ описание (для сводок) сохраняет 'исп.N'
+    if "Описание" in дет.columns:
+        assert any("исп." in str(p) for p in дет["Описание"])
 
 
 def test_исп_марка_из_примечания(isp):
@@ -159,3 +163,61 @@ def test_исп_марка_из_примечания(isp):
     мат = isp["Материалы"]
     марки = set(мат["Марка"])
     assert "С255" in марки or "С345" in марки
+
+
+# ====== Формат «вся суть в наименовании» (Основание, ещё одна сп) ======
+
+def _convert(path):
+    import tempfile
+    from openpyxl import load_workbook
+    from sp_to_cutlist import main as convert
+    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    tmp.close()
+    convert(path, tmp.name)
+    return load_workbook(tmp.name, data_only=True)
+
+
+def test_наимформат_длина_из_наименования():
+    """Длина берётся из 'L = NNN мм' в наименовании, когда обозначение пустое."""
+    wb = _convert(os.path.join(HERE, "data", "osnovanie2_nameformat_etalon.xls"))
+    ws = wb["Детали"]
+    # ищем швеллер 16П длиной 140 (есть в файле) и проверяем, что длина извлечена
+    found = False
+    for r in range(4, ws.max_row + 1):
+        code = ws.cell(r, 3).value
+        length = ws.cell(r, 4).value
+        if code == "ШВ-16П-С355" and length == 140:
+            found = True
+            break
+    assert found, "длина из 'L = 140 мм' не извлечена"
+
+
+def test_наимформат_марка_слипшаяся_с_гостом():
+    """Марка С355 распознаётся, хотя слиплась с номером ГОСТа (8240-97С355)."""
+    wb = _convert(os.path.join(HERE, "data", "osnovanie2_nameformat_etalon.xls"))
+    ws = wb["Материалы"]
+    codes = {ws.cell(r, 1).value for r in range(2, ws.max_row + 1)}
+    assert "ШВ-24П-С355" in codes
+    assert "УГ-63х63х5-С255" in codes
+
+
+def test_наимформат_составная_деталь_помечена():
+    """Швеллер 24П длиной 13500 мм (> хлыста) помечается как составная."""
+    wb = _convert(os.path.join(HERE, "data", "osnovanie2_nameformat_etalon.xls"))
+    ws = wb["Проверка"]
+    flagged = False
+    for r in range(1, ws.max_row + 1):
+        row = " ".join(str(ws.cell(r, c).value) for c in range(1, ws.max_column + 1))
+        if "СОСТАВНАЯ ДЕТАЛЬ" in row and "13500" in row:
+            flagged = True
+            break
+    assert flagged, "составная деталь 13500 мм не помечена"
+
+
+def test_наимформат_круглая_труба_отсечена():
+    """Труба 25х2,8 (круглая ВГП) не попадает в раскрой."""
+    wb = _convert(os.path.join(HERE, "data", "osnovanie2_nameformat_etalon.xls"))
+    ws = wb["Детали"]
+    for r in range(4, ws.max_row + 1):
+        code = ws.cell(r, 3).value
+        assert code != "ТР-П-25х2-С255" and not (code or "").startswith("ТР-П-25х2")

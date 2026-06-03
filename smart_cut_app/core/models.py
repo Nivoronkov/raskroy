@@ -33,6 +33,11 @@ class Part:
     quantity: int
     assembly: str = ""
     note: str = ""
+    # Разделение составной детали (длиннее хлыста) на части. Если деталь —
+    # часть составной, здесь номер части (1,2,...) и обозначение исходной.
+    part_index: int = 0          # 0 = не часть; 1,2,... = номер части ('ч.N')
+    split_parent_id: str = ""    # id исходной составной детали
+    split_total_parts: int = 0   # на сколько частей разделена исходная
 
 
 @dataclass
@@ -62,6 +67,8 @@ class ExpandedPart:
     sequence_no: int
     assembly: str = ""
     note: str = ""
+    part_index: int = 0          # номер части составной детали ('ч.N'), 0 = не часть
+    split_parent_id: str = ""
 
 
 @dataclass

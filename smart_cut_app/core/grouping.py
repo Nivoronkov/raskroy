@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from core.models import Material, Part, ExpandedPart, CalculationSettings
+from core.normalization import canonical_code_key
 
 
 @dataclass
@@ -33,6 +34,8 @@ def expand_parts(parts: List[Part], settings: CalculationSettings) -> List[Expan
                 sequence_no=sequence_no,
                 assembly=part.assembly,
                 note=part.note,
+                part_index=part.part_index,
+                split_parent_id=part.split_parent_id,
             )
             expanded.append(expanded_part)
 
@@ -49,6 +52,9 @@ def group_parts_by_material(
     Внутри каждой группы детали сортируются по убыванию effective_length_mm.
     """
     materials_by_code: Dict[str, Material] = {material.code: material for material in materials}
+    materials_by_canon: Dict[str, Material] = {
+        canonical_code_key(material.code): material for material in materials
+    }
     expanded_parts = expand_parts(parts, settings)
 
     grouped: Dict[str, List[ExpandedPart]] = {}
@@ -61,16 +67,26 @@ def group_parts_by_material(
     for material_code, group_parts in grouped.items():
         material = materials_by_code.get(material_code)
         if material is None:
+            material = materials_by_canon.get(canonical_code_key(material_code))
+        if material is None:
             # На практике сюда не должны попадать невалидные данные,
             # потому что это уже должен отловить validators.py
             continue
 
-        group_parts.sort(key=lambda item: item.effective_length_mm, reverse=True)
+        # Детали длиннее хлыста (составные/сварные) физически не укладываются —
+        # исключаем из раскроя. Предупреждение о них уже выдал validators.py.
+        cuttable_parts = [
+            p for p in group_parts if p.effective_length_mm <= material.stock_length_mm
+        ]
+        if not cuttable_parts:
+            continue
+
+        cuttable_parts.sort(key=lambda item: item.effective_length_mm, reverse=True)
 
         prepared_groups.append(
             PreparedGroup(
                 material=material,
-                expanded_parts=group_parts,
+                expanded_parts=cuttable_parts,
             )
         )
 

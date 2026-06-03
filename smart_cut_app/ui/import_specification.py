@@ -69,6 +69,7 @@ def import_specification(xls_path: str):
     try:
         convert_sp(xls_path, tmp.name)
         parts = _read_parts(tmp.name)
+        spec_materials = _read_materials(tmp.name)   # карточки из листа "Материалы"
     finally:
         try:
             os.unlink(tmp.name)
@@ -82,8 +83,46 @@ def import_specification(xls_path: str):
         )
 
     missing = _check_catalog(parts)
+    # карточки только недостающих материалов — для быстрого добавления на склад
+    missing_cards = [m for m in spec_materials if m["material_code"] in set(missing)]
     info = _build_info(parts, missing)
-    return parts, missing, info
+    return parts, missing, info, missing_cards
+
+
+def _read_materials(vhod_path: str):
+    """
+    Читает лист 'Материалы' временного файла -> список карточек:
+    {material_code, profile_type, size, grade, stock_length_mm}.
+    Нужно для предзаполнения формы быстрого добавления на склад.
+    """
+    wb = load_workbook(vhod_path, data_only=True)
+    if "Материалы" not in wb.sheetnames:
+        return []
+    ws = wb["Материалы"]
+    headers = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        if v:
+            headers[str(v).strip()] = c
+
+    def cell(r, name):
+        c = headers.get(name)
+        return ws.cell(row=r, column=c).value if c else None
+
+    cards = []
+    for r in range(2, ws.max_row + 1):
+        code = cell(r, "Код материала")
+        if not code:
+            continue
+        cards.append({
+            "material_code": str(code).strip(),
+            "profile_type": str(cell(r, "Тип профиля") or "").strip(),
+            "size": str(cell(r, "Размер") or "").strip(),
+            "grade": str(cell(r, "Марка") or "").strip(),
+            "stock_length_mm": _to_int(cell(r, "Длина хлыста, мм")) or 6000,
+        })
+    return cards
+
 
 
 def _read_parts(vhod_path: str):

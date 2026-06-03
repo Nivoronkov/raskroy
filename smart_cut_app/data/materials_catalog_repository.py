@@ -3,6 +3,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.models import MaterialCatalogItem
+from core.normalization import (
+    PROFILE_TYPE_MAP,
+    material_code as _build_material_code,
+    material_name as _build_material_name,
+    normalize_grade,
+    normalize_size,
+)
 
 
 class MaterialsCatalogError(Exception):
@@ -12,39 +19,14 @@ class MaterialsCatalogError(Exception):
 DEFAULT_CATALOG_FILE = "materials_catalog.json"
 
 
-PROFILE_TYPE_MAP = {
-    "Труба профильная": "ТР-П",
-    "Труба круглая": "ТР-К",
-    "Швеллер": "ШВ",
-    "Уголок": "УГ",
-    "Полоса": "ПЛ",
-    "Круг": "КР",
-    "Лист": "ЛИСТ",
-    "Балка тавровая": "БЛ-Т",
-    "Балка двутавровая": "БЛ-ТД",
-}
-
-
 def generate_material_code(profile_type: str, size: str, steel_grade: str) -> str:
-    profile_code = PROFILE_TYPE_MAP.get(profile_type, "").strip()
-    size = size.strip()
-    steel_grade = steel_grade.strip().upper()
-
-    if not profile_code or not size or not steel_grade:
-        return ""
-
-    return f"{profile_code}-{size}-{steel_grade}"
+    """Канонический код материала. Делегирует единому модулю нормализации."""
+    return _build_material_code(profile_type, size, steel_grade)
 
 
 def generate_material_name(profile_type: str, size: str, steel_grade: str) -> str:
-    profile_type = profile_type.strip()
-    size = size.strip()
-    steel_grade = steel_grade.strip()
-
-    if not profile_type or not size or not steel_grade:
-        return ""
-
-    return f"{profile_type} {size} {steel_grade}"
+    """Наименование материала с нормализованными размером и маркой."""
+    return _build_material_name(profile_type, size, steel_grade)
 
 
 def _item_to_dict(item: MaterialCatalogItem) -> Dict[str, Any]:
@@ -137,16 +119,6 @@ def get_next_catalog_item_id(
     return f"MATCAT-{next_number:04d}"
 
 
-def normalize_size(size: str) -> str:
-    return (
-        size.strip()
-        .replace("X", "х")
-        .replace("x", "х")
-        .replace("*", "х")
-        .replace(" ", "")
-    )
-
-
 def find_duplicate_catalog_item(
     profile_type: str,
     size: str,
@@ -155,8 +127,13 @@ def find_duplicate_catalog_item(
     file_path: str = DEFAULT_CATALOG_FILE,
     exclude_id: str = "",
 ) -> Optional[MaterialCatalogItem]:
+    """
+    Ищет в справочнике материал, совпадающий по типу + НОРМАЛИЗОВАННОМУ размеру
+    + КАНОНИЧЕСКОЙ марке + длине хлыста. За счёт нормализации '100Х100Х5' и
+    '100х100х5', а также 'Ст3пс3-св' и 'Ст3' опознаются как один материал.
+    """
     normalized_size = normalize_size(size)
-    normalized_grade = steel_grade.strip().upper()
+    normalized_grade = normalize_grade(steel_grade)
 
     for item in load_materials_catalog(file_path):
         if exclude_id and item.id == exclude_id:
@@ -165,11 +142,25 @@ def find_duplicate_catalog_item(
         if (
             item.profile_type == profile_type
             and normalize_size(item.size) == normalized_size
-            and item.steel_grade.strip().upper() == normalized_grade
+            and normalize_grade(item.steel_grade) == normalized_grade
             and item.stock_length_mm == stock_length_mm
         ):
             return item
 
+    return None
+
+
+def find_catalog_item_by_code(
+    material_code: str,
+    file_path: str = DEFAULT_CATALOG_FILE,
+) -> Optional[MaterialCatalogItem]:
+    """Поиск материала по точному коду (коды уже канонические)."""
+    code = (material_code or "").strip()
+    if not code:
+        return None
+    for item in load_materials_catalog(file_path):
+        if item.material_code == code:
+            return item
     return None
 
 

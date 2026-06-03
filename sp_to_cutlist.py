@@ -9,30 +9,84 @@
     доработка отдельным флагом (не мешает зелёному).
 """
 import re
+import os
 import sys
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.formatting.rule import FormulaRule
 
-PROFILE_MAP = {
-    "Труба профильная": "ТР-П", "Труба круглая": "ТР-К", "Швеллер": "ШВ",
-    "Уголок": "УГ", "Полоса": "ПЛ", "Круг": "КР",
-}
+# Единый модуль нормализации (тот же, что использует справочник материалов),
+# чтобы код материала из спецификации был идентичен коду из справочника.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in (os.path.join(_HERE, "smart_cut_app"), _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+try:
+    from core.normalization import (
+        normalize_size,
+        normalize_grade,
+        material_code as build_material_code,
+        PROFILE_TYPE_MAP as PROFILE_MAP,
+    )
+    _NORM_OK = True
+except ImportError:
+    # Фолбэк, если модуль недоступен (конвертер должен работать автономно).
+    _NORM_OK = False
+    PROFILE_MAP = {
+        "Труба профильная": "ТР-П", "Труба круглая": "ТР-К", "Швеллер": "ШВ",
+        "Уголок": "УГ", "Полоса": "ПЛ", "Круг": "КР",
+    }
+    import re as _re
+
+    def normalize_size(s):
+        s = _re.sub(r"\s+", "", str(s).strip())
+        s = _re.sub(r"[xXхХ*]", "х", s)
+        s = _re.sub(r"х+", "х", s)
+        m = _re.fullmatch(r"(\d+)([a-zA-Zа-яА-Я]+\d*)", s)
+        if m:
+            letters = m.group(2).upper().replace("U", "П").replace("Y", "У")
+            return f"{m.group(1)}{letters}"
+        return s.lower()
+
+    def normalize_grade(raw):
+        if not raw:
+            return ""
+        g = _re.sub(r"\s+", "", str(raw).strip()); key = g.upper()
+        m = _re.match(r"^СТ(\d+)", key)
+        if m: return f"Ст{m.group(1)}"
+        m = _re.match(r"^С(\d{3})", key)
+        if m: return f"С{m.group(1)}"
+        m = _re.match(r"^(\d{2}Г\d?[А-Я]+)", key)
+        if m: return m.group(1)
+        m = _re.match(r"^СТАЛЬ(\d+)", key)
+        if m: return f"Сталь{m.group(1)}"
+        return g
+
+    def build_material_code(profile, size, grade):
+        prefix = PROFILE_MAP.get(profile, profile)
+        s, g = normalize_size(size), normalize_grade(grade)
+        return f"{prefix}-{s}-{g}" if (prefix and s and g) else ""
+
 STOCK_LENGTH_DEFAULT = {"ТР-П": 6000, "ТР-К": 6000, "ШВ": 11700, "УГ": 11700, "ПЛ": 6000, "КР": 6000}
 SHEET_KEYWORDS = ("Лист", "Пластина", "Косынка", "Ребро", "Сетка", "Скоба",
                   "Бобышка", "Гайка", "Болт", "Шайба", "Винт")
 
 
-def normalize_size(s):
-    return s.strip().upper().replace("X", "х").replace("*", "х").replace(" ", "")
-
 
 def classify_profile(naim):
     n = naim.strip()
-    m = re.search(r"Труба\s+([\dхx*]+)", n, re.I)
+    m = re.search(r"Труба\s+(?:профильная\s+)?([\dхx*.,]+)", n, re.I)
     if m:
-        return "Труба профильная", normalize_size(m.group(1))
+        raw = m.group(1)
+        # профильная труба — сечение AхB или AхBхC (целые числа).
+        # круглая/ВГП ('25х2,8', один диаметр) — не линейный профильный раскрой здесь.
+        if "," in raw or "." in raw:
+            return None, None
+        parts = re.split(r"[хx*]", raw)
+        if len([p for p in parts if p]) < 2:
+            return None, None
+        return "Труба профильная", normalize_size(raw)
     m = re.search(r"Швеллер\s*№?\s*([\dПпUuУу]+)", n, re.I)
     if m:
         return "Швеллер", m.group(1).upper().replace("U", "П").replace("У", "П")
@@ -69,6 +123,55 @@ def grade_from_note(primech):
     """Запасной источник марки: класс прочности в примечании, напр. 'С255-4' -> 'С255'."""
     m = re.search(r"(С\d{3})", str(primech))
     return m.group(1) if m else ""
+
+
+def length_from_name(naim):
+    """
+    Извлекает длину из наименования вида 'L = 13500_д1 мм' (формат, где вся суть
+    в наименовании, а обозначение пустое). Возвращает (длина|None, доработка).
+    """
+    m = re.search(r"L\s*=\s*(\d+)\s*(_д\d*)?\s*мм", str(naim), re.IGNORECASE)
+    if not m:
+        return None, ""
+    return int(m.group(1)), (m.group(2) or "")
+
+
+def grade_from_name(naim):
+    """
+    Извлекает марку из наименования, в т.ч. когда она слиплась с номером ГОСТа
+    ('ГОСТ 8240-97С355' -> 'С355'). Возвращает каноническую марку или ''.
+    """
+    t = str(naim)
+    m = re.search(r"С(\d{3})", t)            # класс прочности С255/С345/С355
+    if m:
+        return normalize_grade("С" + m.group(1))
+    m = re.search(r"Ст\d+[а-яА-Я0-9\-]*", t)  # Ст3 и доработки
+    if m:
+        return normalize_grade(m.group(0))
+    m = re.search(r"\d{2}Г\d?[А-Я]+", t)      # 09Г2С и т.п.
+    if m:
+        return normalize_grade(m.group(0))
+    return ""
+
+
+def make_short_note(isp, dorab):
+    """
+    Краткое примечание для схемы раскроя.
+    Исполнение: '-04'->'4', '-01'->'1', '-'/'' -> пусто (без исполнения не печатаем).
+    Доработка:  '_д'->'д', '_д1'->'д1'.
+    Результат: 'исполнение доработка' через пробел, напр. '4 д', '1', 'д1', ''.
+    """
+    parts = []
+    s = str(isp or "").strip()
+    if s and s != "-":
+        # оставляем только значащий номер исполнения (без ведущих дефисов/нулей)
+        num = s.lstrip("-").lstrip("0") or s.lstrip("-")
+        if num:
+            parts.append(num)
+    d = str(dorab or "").strip().lstrip("_")
+    if d:
+        parts.append(d)
+    return " ".join(parts)
 
 
 def material_size(obozn_mat):
@@ -135,6 +238,17 @@ def main(src_xls, out_xlsx):
         full_desig, length, dorab = parse_designation(obozn_raw, base_desig)
         grade = extract_grade(obozn_mat) or grade_from_note(primech)
 
+        # Фолбэк для формата, где вся суть в наименовании (обозначение пустое):
+        # длина 'L = NNN мм' и марка, слипшаяся с ГОСТом, берутся из наименования.
+        if length is None:
+            name_len, name_dorab = length_from_name(naim)
+            if name_len is not None:
+                length = name_len
+                if name_dorab and not dorab:
+                    dorab = name_dorab
+        if not grade:
+            grade = grade_from_name(naim)
+
         warn = []
         if length is None:
             warn.append("длина не извлечена")
@@ -150,8 +264,23 @@ def main(src_xls, out_xlsx):
         if conflict:
             warn.append(conflict)
 
+        # каноническая марка (Ст3пс3-св -> Ст3, С255-4 -> С255) — единый формат
+        grade = normalize_grade(grade)
+        # код материала собирается тем же модулем, что и в справочнике,
+        # поэтому совпадает байт-в-байт (нет дублей из-за регистра/написания)
         prefix = PROFILE_MAP.get(profile_type, "")
-        code = f"{prefix}-{size}-{grade.upper()}" if (prefix and size and grade) else ""
+        code = build_material_code(profile_type, size, grade)
+
+        # Составная/сварная деталь: длина больше стандартного хлыста — раскроем
+        # как единичную деталь нельзя, разбивка определяется конструкторами под
+        # заказ. Помечаем для ручного решения.
+        if length is not None:
+            stock_default = STOCK_LENGTH_DEFAULT.get(prefix, 6000)
+            if length > stock_default:
+                warn.append(
+                    f"СОСТАВНАЯ ДЕТАЛЬ: длина {length} мм больше хлыста "
+                    f"{stock_default} мм — разбивка с конструкторами"
+                )
 
         # разворот по исполнениям: одна строка на каждое исполнение с кол-вом
         for col, isp in ispoln.items():
@@ -162,12 +291,18 @@ def main(src_xls, out_xlsx):
                 qty = int(float(qv.replace(",", ".")))
             except ValueError:
                 continue
-            note_parts = []
+            # ПОЛНОЕ описание (для сводок/карты раскроя/производства)
+            desc_parts = []
             if isp:
-                note_parts.append(f"исп.{isp}")
+                desc_parts.append(f"исп.{isp}")
             if dorab:
-                note_parts.append(f"доработка{dorab}")
-            note = " ".join(note_parts)
+                desc_parts.append(f"доработка{dorab}")
+            description = " ".join(desc_parts)
+
+            # КРАТКОЕ примечание (для схемы раскроя — печатается под длиной):
+            # исполнение коротким номером (без исполнения — пусто) и доработка
+            # одной буквой через пробел: '4 д', '1', 'д1'.
+            note = make_short_note(isp, dorab)
 
             if warn:
                 checks.append([pos, full_desig, naim, isp or "-", size, grade,
@@ -175,7 +310,9 @@ def main(src_xls, out_xlsx):
             parts.append({
                 "Обозначение": full_desig, "Наименование детали": naim, "Код материала": code,
                 "Длина, мм": length if length else "", "Количество": qty,
-                "Исполнение": isp, "Доработка": dorab, "Примечание": note,
+                "Исполнение": isp, "Доработка": dorab,
+                "Примечание": note,          # краткое -> на схему раскроя
+                "Описание": description,      # полное -> в сводки
                 "_conflict": bool(conflict),
             })
             if code and code not in materials:
@@ -209,7 +346,7 @@ def write_workbook(path, parts, materials, checks, cut_off, has_isp):
     # ===== Лист Детали со светофором =====
     ws = wb.active; ws.title = "Детали"
     cols = ["Обозначение", "Наименование детали", "Код материала", "Длина, мм",
-            "Количество", "Исполнение", "Доработка", "Примечание"]
+            "Количество", "Исполнение", "Доработка", "Примечание", "Описание"]
     n = len(cols)
     status_col = n + 1
     sc = chr(64 + status_col)
@@ -253,7 +390,7 @@ def write_workbook(path, parts, materials, checks, cut_off, has_isp):
         # зелёный — всё ок
         ws.conditional_formatting.add(rng, FormulaRule(formula=['AND($C4<>"",$D4<>"")'], fill=green))
 
-    for i, w in enumerate([26, 22, 26, 10, 11, 11, 11, 24, 13], 1):
+    for i, w in enumerate([26, 22, 26, 10, 11, 11, 11, 14, 24, 13], 1):
         ws.column_dimensions[chr(64 + i)].width = w
 
     # ===== Материалы =====
