@@ -30,6 +30,13 @@ def _find_converter_dir():
         os.getcwd(),                   # текущая рабочая папка
         _ui,                           # на всякий случай — папка ui
     ]
+    # в собранном .exe — папка рядом с исполняемым файлом
+    if getattr(sys, "frozen", False):
+        candidates.insert(0, os.path.dirname(sys.executable))
+        # PyInstaller распаковывает данные во временную папку _MEIPASS
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.insert(0, meipass)
     for d in candidates:
         if os.path.exists(os.path.join(d, "sp_to_cutlist.py")):
             return d
@@ -57,7 +64,8 @@ def import_specification(xls_path: str):
             "Не найден файл конвертера sp_to_cutlist.py.\n"
             f"Искал рядом с smart_cut_app, внутри неё и в текущей папке.\n"
             f"Найденная папка: {searched}\n"
-            "Положи sp_to_cutlist.py в C:\\raskroy\\ (рядом с папкой smart_cut_app)."
+            "Положи sp_to_cutlist.py рядом с папкой smart_cut_app "
+            "(в корневую папку программы)."
         ) from exc
 
     if not os.path.exists(xls_path):

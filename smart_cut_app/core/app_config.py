@@ -18,10 +18,25 @@ r"""
 """
 import json
 import os
+import sys
 from typing import Optional
 
-# Папка программы (на уровень выше core/)
-APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _app_dir() -> str:
+    """
+    Папка приложения — где лежат справочники и конфиг.
+    - В обычном запуске (python): папка пакета smart_cut_app (на уровень выше core/).
+    - В собранном .exe (PyInstaller): папка, где лежит сам .exe.
+    Так данные всегда оказываются рядом с программой и доступны для правки.
+    """
+    if getattr(sys, "frozen", False):
+        # запущено как собранный .exe — данные рядом с исполняемым файлом
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# Папка программы (где конфиг и справочники по умолчанию)
+APP_DIR = _app_dir()
 
 _CONFIG_FILE = os.path.join(APP_DIR, "app_config.json")
 
