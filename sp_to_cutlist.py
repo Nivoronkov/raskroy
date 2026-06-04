@@ -76,17 +76,23 @@ SHEET_KEYWORDS = ("Лист", "Пластина", "Косынка", "Ребро"
 
 def classify_profile(naim):
     n = naim.strip()
+    # Круглая / ВГП труба: 'Труба Ду80х4,0', 'Труба 25х2,8' (диаметр x стенка).
+    # Раньше отсекалась — теперь раскраивается как погонаж (тип "Труба круглая").
+    m = re.search(r"Труба\s+Ду\s*([\d.,х x*]+)", n, re.I)
+    if m:
+        return "Труба круглая", normalize_size(m.group(1))
     m = re.search(r"Труба\s+(?:профильная\s+)?([\dхx*.,]+)", n, re.I)
     if m:
         raw = m.group(1)
-        # профильная труба — сечение AхB или AхBхC (целые числа).
-        # круглая/ВГП ('25х2,8', один диаметр) — не линейный профильный раскрой здесь.
+        # десятичная (запятая/точка) -> круглая/ВГП (напр. 25х2,8)
         if "," in raw or "." in raw:
-            return None, None
-        parts = re.split(r"[хx*]", raw)
-        if len([p for p in parts if p]) < 2:
-            return None, None
-        return "Труба профильная", normalize_size(raw)
+            return "Труба круглая", normalize_size(raw)
+        nonempty = [p for p in re.split(r"[хx*]", raw) if p]
+        # профильная труба — сечение из 2-3 целых (40х40, 80х40х3)
+        if len(nonempty) >= 2:
+            return "Труба профильная", normalize_size(raw)
+        # один размер -> круглая
+        return "Труба круглая", normalize_size(raw)
     m = re.search(r"Швеллер\s*№?\s*([\dПпUuУу]+)", n, re.I)
     if m:
         return "Швеллер", m.group(1).upper().replace("U", "П").replace("У", "П")
@@ -120,9 +126,24 @@ def extract_grade(obozn_mat):
 
 
 def grade_from_note(primech):
-    """Запасной источник марки: класс прочности в примечании, напр. 'С255-4' -> 'С255'."""
-    m = re.search(r"(С\d{3})", str(primech))
-    return m.group(1) if m else ""
+    """
+    Марка из столбца G (Примечание) — основной источник.
+    Ловит класс прочности (С255, С345, С255-4, С345-5), марки Ст3 и 09Г2С.
+    Нормализация суффиксов (-4/-5) делается позже в normalize_grade.
+    """
+    t = str(primech)
+    if not t or t.lower() == "nan":
+        return ""
+    m = re.search(r"С\d{3}", t)
+    if m:
+        return m.group(0)
+    m = re.search(r"Ст\d+[а-яА-Я0-9\-]*", t)
+    if m:
+        return m.group(0)
+    m = re.search(r"\d{2}Г\d?[А-Я]+", t)
+    if m:
+        return m.group(0)
+    return ""
 
 
 def length_from_name(naim):
@@ -214,6 +235,27 @@ def main(src_xls, out_xlsx):
 
     rows = df[df[2].notna() & df[2].astype(str).str.match(r"^\d+$", na=False)]
 
+    # Предпроход: в разделе "Материалы" профиль бывает написан строкой-заголовком
+    # НАД позицией (напр. 'Труба Ду80х4,0'), а сама позиция содержит только
+    # 'L=184 мм'. Соберём для таких позиций профиль из ближайшего заголовка сверху.
+    header_profile_by_pos = {}
+    last_header = ""
+    for i in range(len(df)):
+        naim_i = str(df.iloc[i, 4]).strip()
+        pos_i = str(df.iloc[i, 2]).strip()
+        is_pos = pos_i.isdigit()
+        if not is_pos:
+            # строка без позиции: возможный заголовок-профиль (содержит профиль и не служебная)
+            if naim_i and naim_i.lower() != "nan":
+                pt, _ = classify_profile(naim_i)
+                if pt is not None:
+                    last_header = naim_i
+            continue
+        # строка с позицией: если в её наименовании нет профиля, а заголовок есть — запомним
+        pt_here, _ = classify_profile(naim_i)
+        if pt_here is None and last_header:
+            header_profile_by_pos[pos_i] = last_header
+
     parts, materials, checks, cut_off = [], {}, [], []
     base_desig = ""
 
@@ -232,11 +274,24 @@ def main(src_xls, out_xlsx):
             continue
         profile_type, size = classify_profile(naim)
         if profile_type is None:
+            # позиция из раздела "Материалы": профиль в заголовке над строкой
+            header = header_profile_by_pos.get(pos, "")
+            if header:
+                profile_type, size = classify_profile(header)
+        if profile_type is None:
             cut_off.append([pos, obozn_raw, naim, "не распознан профиль — проверить вручную"])
             continue
 
         full_desig, length, dorab = parse_designation(obozn_raw, base_desig)
-        grade = extract_grade(obozn_mat) or grade_from_note(primech)
+        # Марка: ПРИОРИТЕТ столбцу G (Примечание) — там верные данные (С255-4, С345-5).
+        # Столбец "Обозначение материала" (после G) часто содержит НЕВЕРНЫЕ данные
+        # (чужой размер/марку), поэтому как источник марки его НЕ используем.
+        # Если в G пусто — ищем в обозначении и в наименовании.
+        grade = (
+            grade_from_note(primech)
+            or extract_grade(obozn_raw)
+            or grade_from_name(naim)
+        )
 
         # Фолбэк для формата, где вся суть в наименовании (обозначение пустое):
         # длина 'L = NNN мм' и марка, слипшаяся с ГОСТом, берутся из наименования.
@@ -253,16 +308,17 @@ def main(src_xls, out_xlsx):
         if length is None:
             warn.append("длина не извлечена")
         if not grade:
-            warn.append("марка не определена")
-        msize = material_size(obozn_mat)
-        conflict = ""
-        if profile_type == "Швеллер" and msize and size and msize != size:
-            conflict = f"размер: наимен.='{size}' / сортамент='{msize}'"
-            size = msize
-        elif profile_type == "Труба профильная" and msize and size and msize != size:
-            conflict = f"размер: наимен.='{size}' / сортамент='{msize}' (возможна опечатка)"
-        if conflict:
-            warn.append(conflict)
+            if profile_type == "Труба круглая":
+                # ВГП/круглые трубы (ГОСТ 3262) обычно Ст3 — ставим по умолчанию,
+                # чтобы деталь попала в расчёт; помечаем для информации технолога.
+                grade = "Ст3"
+                warn.append("марка не указана в СП — принята Ст3 (проверьте)")
+            else:
+                warn.append("марка не определена")
+        # Размер берём ТОЛЬКО из наименования. Столбец "Обозначение материала"
+        # (после G) часто содержит неверный размер (напр. для швеллера 16П там
+        # значится 12У), поэтому сверку с ним не делаем — она давала ложные
+        # конфликты.
 
         # каноническая марка (Ст3пс3-св -> Ст3, С255-4 -> С255) — единый формат
         grade = normalize_grade(grade)
@@ -313,7 +369,7 @@ def main(src_xls, out_xlsx):
                 "Исполнение": isp, "Доработка": dorab,
                 "Примечание": note,          # краткое -> на схему раскроя
                 "Описание": description,      # полное -> в сводки
-                "_conflict": bool(conflict),
+                "_conflict": False,
             })
             if code and code not in materials:
                 materials[code] = {

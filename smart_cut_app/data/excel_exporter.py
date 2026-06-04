@@ -55,23 +55,17 @@ def _display_group_key(designation: str, name: str) -> str:
 
 
 def _get_pattern_group_title(pattern) -> str:
-    group_titles = set()
-
-    for part in pattern.parts:
-        group_titles.add(
-            _display_group_key(
-                getattr(part, "designation", ""),
-                getattr(part, "name", ""),
-            )
-        )
-
-    if not group_titles:
-        return "Без обозначения — Без наименования"
-
-    if len(group_titles) == 1:
-        return next(iter(group_titles))
-
-    return "Смешанная группа"
+    """
+    Заголовок блока = МАТЕРИАЛ (код + наименование). Лентопильщику нужно видеть
+    весь один материал подряд, поэтому группируем строго по материалу, а не по
+    обозначению деталей (раньше один материал разбивался на разные блоки, а в
+    одном хлысте разные детали давали «Смешанную группу»).
+    """
+    code = getattr(pattern, "material_code", "") or ""
+    name = getattr(pattern, "material_name", "") or ""
+    if code and name:
+        return f"{code} — {name}"
+    return code or name or "Без материала"
 
 
 def _set_header_row(sheet, headers: list[str], row_num: int) -> None:
@@ -151,11 +145,22 @@ def _fill_visual_pattern(sheet, start_row: int, pattern, pattern_index: int) -> 
     current_col = first_visual_col
     stock_length = max(pattern.stock_length_mm, 1)
 
+    # Сколько колонок зарезервировать под остаток, чтобы он был виден.
+    # Из-за округления ширины деталей маленький остаток мог «съедаться» (детали
+    # занимали все 60 колонок). Резервируем минимум 1 колонку, если остаток есть.
+    leftover_len = max(0, int(pattern.leftover_length_mm))
+    if leftover_len > 0:
+        reserved_leftover_cols = max(1, round((leftover_len / stock_length) * total_visual_cols))
+    else:
+        reserved_leftover_cols = 0
+    cols_for_parts = total_visual_cols - reserved_leftover_cols
+
     for idx, part in enumerate(pattern.parts):
         length = int(part.base_length_mm)
         width_cols = max(1, round((length / stock_length) * total_visual_cols))
 
-        remaining_cols = total_visual_cols - used_cols
+        # детали не должны заезжать на зарезервированные под остаток колонки
+        remaining_cols = cols_for_parts - used_cols
         width_cols = min(width_cols, max(1, remaining_cols))
         end_col = current_col + width_cols - 1
 
@@ -368,6 +373,26 @@ def export_result_to_excel(result: CalculationResult, file_path: str) -> None:
 
     _autosize_columns(production_sheet)
 
+    # Лист "Отрезки" — сводка отрезков по деталям для лентопильщика
+    cutoff_sheet = workbook.create_sheet("Отрезки")
+    cutoff_sheet["A1"] = (
+        "Сводка отрезков по каждому материалу — для пересчёта нарезанного по факту."
+    )
+    cutoff_sheet["A1"].font = Font(bold=True)
+    cutoff_sheet.append([])
+    cutoff_headers = ["Код материала", "Материал", "Отрезки (длина — количество)", "Всего деталей"]
+    cutoff_sheet.append(cutoff_headers)
+    for cell in cutoff_sheet[3]:
+        cell.font = Font(bold=True)
+    for row in result.cutoff_summary_rows:
+        cutoff_sheet.append([
+            row.material_code,
+            row.material_name,
+            row.as_text(),
+            row.total_count,
+        ])
+    _autosize_columns(cutoff_sheet)
+
     # Лист 4: Движение остатков
     movement_sheet = workbook.create_sheet("Движение остатков")
 
@@ -440,6 +465,9 @@ def export_result_to_excel(result: CalculationResult, file_path: str) -> None:
         grouped_visual.setdefault(group_title, []).append(pattern)
 
     pattern_counter = 1
+    # сводка отрезков по коду материала — чтобы вывести её после блока
+    cutoff_by_code = {row.material_code: row for row in result.cutoff_summary_rows}
+
     for group_title, patterns in grouped_visual.items():
         visual_sheet.merge_cells(
             start_row=current_row,
@@ -461,6 +489,18 @@ def export_result_to_excel(result: CalculationResult, file_path: str) -> None:
                 pattern_counter,
             )
             pattern_counter += 1
+
+        # Сводка отрезков по этому материалу (для лентопильщика) — сразу под блоком.
+        material_code = patterns[0].material_code if patterns else ""
+        cutoff_row = cutoff_by_code.get(material_code)
+        if cutoff_row and cutoff_row.items:
+            visual_sheet.merge_cells(
+                start_row=current_row, start_column=1, end_row=current_row, end_column=61
+            )
+            label_cell = visual_sheet.cell(current_row, 1, f"Отрезки:  {cutoff_row.as_text()}")
+            label_cell.font = Font(bold=True)
+            label_cell.alignment = Alignment(vertical="center")
+            current_row += 1
 
         current_row += 1
 

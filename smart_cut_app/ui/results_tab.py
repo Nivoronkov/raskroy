@@ -93,6 +93,12 @@ class ResultsTab(QWidget):
         self.movement_table = QTableWidget(0, len(self.MOVEMENT_HEADERS))
         self.movement_table.setHorizontalHeaderLabels(self.MOVEMENT_HEADERS)
 
+        self.cutoff_table = QTableWidget(0, 4)
+        self.cutoff_table.setHorizontalHeaderLabels(
+            ["Материал", "Наименование", "Отрезки (длина — количество)", "Всего деталей"]
+        )
+        self.cutoff_table.horizontalHeader().setStretchLastSection(False)
+
         for table in [
             self.summary_table,
             self.patterns_table,
@@ -129,6 +135,7 @@ class ResultsTab(QWidget):
         tabs.addTab(self._wrap_widget(self.summary_table), "Сводка")
         tabs.addTab(self._wrap_widget(self.patterns_table), "Карты раскроя")
         tabs.addTab(self._wrap_widget(self.production_table), "Производство")
+        tabs.addTab(self._wrap_widget(self.cutoff_table), "Отрезки")
         tabs.addTab(self._wrap_widget(self.movement_table), "Движение остатков")
         tabs.addTab(self.visual_scroll, "Схема раскроя")
 
@@ -152,6 +159,7 @@ class ResultsTab(QWidget):
         self.summary_table.setRowCount(0)
         self.patterns_table.setRowCount(0)
         self.production_table.setRowCount(0)
+        self.cutoff_table.setRowCount(0)
         self.movement_table.setRowCount(0)
         self._clear_visualization()
         self.save_leftovers_button.setEnabled(True)
@@ -166,6 +174,7 @@ class ResultsTab(QWidget):
         self._fill_summary(result)
         self._fill_patterns(result)
         self._fill_production(result)
+        self._fill_cutoff_summary(result)
         self._fill_movements(result)
         self._fill_visualization(result)
 
@@ -226,6 +235,19 @@ class ResultsTab(QWidget):
             ]
             for col, value in enumerate(values):
                 self.patterns_table.setItem(row_index, col, QTableWidgetItem(value))
+
+    def _fill_cutoff_summary(self, result: CalculationResult) -> None:
+        for row_index, row in enumerate(result.cutoff_summary_rows):
+            self.cutoff_table.insertRow(row_index)
+            values = [
+                row.material_code,
+                row.material_name,
+                row.as_text(),
+                str(row.total_count),
+            ]
+            for col, value in enumerate(values):
+                self.cutoff_table.setItem(row_index, col, QTableWidgetItem(value))
+        self.cutoff_table.resizeColumnsToContents()
 
     def _fill_production(self, result: CalculationResult) -> None:
         for row_index, row in enumerate(result.production_rows):

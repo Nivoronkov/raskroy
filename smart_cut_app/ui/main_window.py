@@ -68,6 +68,55 @@ class MainWindow(QMainWindow):
         catalog_path_action.triggered.connect(self.configure_catalog_path)
         settings_menu.addAction(catalog_path_action)
 
+        leftovers_path_action = QAction("Путь к справочнику остатков…", self)
+        leftovers_path_action.triggered.connect(self.configure_leftovers_path)
+        settings_menu.addAction(leftovers_path_action)
+
+        # --- Справка ---
+        help_menu = self.menuBar().addMenu("Справка")
+        about_action = QAction("О программе", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def show_about(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        from core.app_info import about_text, APP_NAME
+        QMessageBox.about(self, f"О программе — {APP_NAME}", about_text())
+
+    def configure_leftovers_path(self) -> None:
+        """Путь к справочнику остатков (можно общий в сетевой папке)."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from core import app_config
+
+        current = app_config.get_leftovers_path()
+        default = app_config.get_default_leftovers_path()
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Путь к справочнику остатков")
+        msg.setText(
+            f"Текущая база остатков:\n{current}\n\n"
+            "Выбрать общую базу остатков (например, в сетевой папке) или вернуть "
+            "базу по умолчанию рядом с программой?"
+        )
+        choose_btn = msg.addButton("Выбрать файл…", QMessageBox.ButtonRole.AcceptRole)
+        default_btn = msg.addButton("По умолчанию", QMessageBox.ButtonRole.ResetRole)
+        msg.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is choose_btn:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Выберите файл базы остатков",
+                current if current else default,
+                "База остатков (*.json);;Все файлы (*.*)",
+            )
+            if path:
+                app_config.set_leftovers_path(path)
+                QMessageBox.information(self, "Готово", f"База остатков теперь:\n{path}")
+        elif clicked is default_btn:
+            app_config.set_leftovers_path(None)
+            QMessageBox.information(self, "Готово", f"Возвращена база по умолчанию:\n{default}")
+
     def configure_catalog_path(self) -> None:
         """
         Позволяет задать путь к справочнику материалов — например, общий файл в
@@ -113,7 +162,11 @@ class MainWindow(QMainWindow):
             )
 
     def _create_statusbar(self) -> None:
-        self.statusBar().showMessage("Автор: Воронков Н.А.")
+        # постоянный виджет в статусбаре (не showMessage, чтобы не пропадал)
+        from PySide6.QtWidgets import QLabel
+        from core.app_info import short_caption
+        self._author_label = QLabel(short_caption())
+        self.statusBar().addPermanentWidget(self._author_label)
 
     def _build_project_materials_from_parts(self, parts) -> list[Material]:
         catalog_items = load_materials_catalog()

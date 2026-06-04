@@ -30,6 +30,11 @@ APP = os.path.join(ROOT, "smart_cut_app")
 datas = [
     (os.path.join(ROOT, "sp_to_cutlist.py"), "."),
 ]
+# иконку кладём рядом с .exe, чтобы окно и панель задач её находили
+for _ico in ("app.ico", "app_ico.ico"):
+    if os.path.exists(os.path.join(ROOT, _ico)):
+        datas.append((os.path.join(ROOT, _ico), "."))
+        break
 
 # Скрытые импорты — модули, которые подтягиваются не напрямую.
 hiddenimports = [

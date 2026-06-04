@@ -80,6 +80,12 @@ class PartsTab(QWidget):
         self.remove_button.clicked.connect(self.remove_selected_rows)
         self.load_demo_button.clicked.connect(self.load_demo_data)
 
+        from PySide6.QtGui import QShortcut, QKeySequence
+        from PySide6.QtCore import Qt as _Qt
+        _del = QShortcut(QKeySequence(_Qt.Key.Key_Delete), self.table)
+        _del.setContext(_Qt.ShortcutContext.WidgetShortcut)
+        _del.activated.connect(self.remove_selected_rows)
+
         title_label = QLabel("Детали")
         title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
 

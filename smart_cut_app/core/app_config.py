@@ -101,3 +101,15 @@ def get_default_catalog_path() -> str:
 
 def get_default_leftovers_path() -> str:
     return _DEFAULT_LEFTOVERS
+
+
+def get_icon_path() -> Optional[str]:
+    """
+    Путь к иконке приложения (app.ico рядом с программой / .exe).
+    Возвращает None, если иконки нет — тогда используется стандартная.
+    """
+    for name in ("app.ico", "app_ico.ico"):
+        candidate = os.path.join(APP_DIR, name)
+        if os.path.exists(candidate):
+            return candidate
+    return None

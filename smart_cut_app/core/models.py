@@ -175,6 +175,21 @@ class MaterialCatalogItem:
     available_stock_bars: int = 0
 
 @dataclass
+class CutoffSummaryRow:
+    """
+    Сводка отрезков по одному материалу — для лентопильщика.
+    Перечень уникальных длин деталей с количеством (напр. '184 — 2 шт., 595 — 20 шт.').
+    Позволяет пересчитать нарезанное по факту и понять, где остановился.
+    """
+    material_code: str
+    material_name: str
+    items: List[tuple] = field(default_factory=list)  # [(длина_мм, количество), ...]
+    total_count: int = 0
+
+    def as_text(self) -> str:
+        return "  ".join(f"{length} — {qty} шт." for length, qty in self.items)
+
+@dataclass
 class CalculationResult:
     """
     Общий результат расчета.
@@ -182,6 +197,7 @@ class CalculationResult:
     summary_rows: List[SummaryRow] = field(default_factory=list)
     patterns: List[CuttingPattern] = field(default_factory=list)
     production_rows: List[ProductionRow] = field(default_factory=list)
+    cutoff_summary_rows: List["CutoffSummaryRow"] = field(default_factory=list)
     leftovers: List[Leftover] = field(default_factory=list)
     consumed_leftover_ids: List[str] = field(default_factory=list)
     leftover_movements: List[LeftoverMovementRow] = field(default_factory=list)

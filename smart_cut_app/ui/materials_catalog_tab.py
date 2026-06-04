@@ -69,6 +69,13 @@ class MaterialsCatalogTab(QWidget):
         self.edit_button.clicked.connect(self.edit_selected)
         self.delete_button.clicked.connect(self.delete_selected)
 
+        # Клавиша Delete на таблице — то же, что кнопка «Удалить»
+        from PySide6.QtGui import QShortcut, QKeySequence
+        from PySide6.QtCore import Qt as _Qt
+        _del = QShortcut(QKeySequence(_Qt.Key.Key_Delete), self.table)
+        _del.setContext(_Qt.ShortcutContext.WidgetShortcut)
+        _del.activated.connect(self.delete_selected)
+
         title_label = QLabel("Справочник материалов")
         title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
 

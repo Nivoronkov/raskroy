@@ -4,6 +4,7 @@ from core.grouping import PreparedGroup, group_parts_by_material
 from core.models import (
     CalculationResult,
     CalculationSettings,
+    CutoffSummaryRow,
     CuttingPattern,
     Leftover,
     LeftoverMovementRow,
@@ -61,6 +62,38 @@ def _build_summary_row(
         total_useful_leftover_mm=total_useful_leftover_mm,
         utilization_percent=utilization_percent,
     )
+
+
+def _build_cutoff_summary(patterns: List[CuttingPattern]) -> List[CutoffSummaryRow]:
+    """
+    Сводка отрезков по деталям для каждого материала (для лентопильщика).
+    Считает, сколько деталей каждой длины всего нарезается из материала.
+    """
+    # материал -> {длина: количество}
+    by_material: Dict[str, Dict[int, int]] = {}
+    names: Dict[str, str] = {}
+
+    for pattern in patterns:
+        mat = pattern.material_code
+        names.setdefault(mat, pattern.material_name)
+        bucket = by_material.setdefault(mat, {})
+        for part in pattern.parts:
+            length = part.base_length_mm
+            bucket[length] = bucket.get(length, 0) + 1
+
+    rows: List[CutoffSummaryRow] = []
+    for mat in sorted(by_material):
+        bucket = by_material[mat]
+        items = [(length, bucket[length]) for length in sorted(bucket, reverse=True)]
+        rows.append(
+            CutoffSummaryRow(
+                material_code=mat,
+                material_name=names.get(mat, ""),
+                items=items,
+                total_count=sum(bucket.values()),
+            )
+        )
+    return rows
 
 
 def _build_production_rows(patterns: List[CuttingPattern]) -> List[ProductionRow]:
@@ -230,6 +263,7 @@ def calculate_cutting(
     result.patterns = all_patterns
     result.summary_rows = summary_rows
     result.production_rows = _build_production_rows(all_patterns)
+    result.cutoff_summary_rows = _build_cutoff_summary(all_patterns)
     result.leftovers = _build_leftovers(all_patterns)
     result.consumed_leftover_ids = _collect_consumed_leftover_ids(all_patterns)
     result.leftover_movements = _build_leftover_movements(
