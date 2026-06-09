@@ -93,10 +93,14 @@ def classify_profile(naim):
             return "Труба профильная", normalize_size(raw)
         # один размер -> круглая
         return "Труба круглая", normalize_size(raw)
+    # 'Профиль40х40х2' (ГОСТ 30245) — это профильная труба (гнутосварной профиль)
+    m = re.search(r"Профиль\s*([\dхx*]+)", n, re.I)
+    if m:
+        return "Труба профильная", normalize_size(m.group(1))
     m = re.search(r"Швеллер\s*№?\s*([\dПпUuУу]+)", n, re.I)
     if m:
         return "Швеллер", m.group(1).upper().replace("U", "П").replace("У", "П")
-    m = re.search(r"Уголок\s+([\dхx*]+)", n, re.I)
+    m = re.search(r"Уголок\s*([\dхx*]+)", n, re.I)
     if m:
         return "Уголок", normalize_size(m.group(1))
     return None, None
@@ -148,13 +152,27 @@ def grade_from_note(primech):
 
 def length_from_name(naim):
     """
-    Извлекает длину из наименования вида 'L = 13500_д1 мм' (формат, где вся суть
-    в наименовании, а обозначение пустое). Возвращает (длина|None, доработка).
+    Извлекает длину из наименования. Поддерживает форматы:
+      'L = 13500_д1 мм'  — доработка до 'мм'
+      'L = 545.2 мм_д'   — доработка после 'мм'
+      'L = 59.5 мм'      — дробная длина (с точкой или запятой)
+    Дробная длина округляется ВВЕРХ до целого мм (раскрой в целых мм, припуск).
+    Возвращает (длина|None, доработка).
     """
-    m = re.search(r"L\s*=\s*(\d+)\s*(_д\d*)?\s*мм", str(naim), re.IGNORECASE)
+    import math
+    t = str(naim)
+    # число длины: целое или дробное (точка/запятая), доработка _дN может стоять
+    # как сразу после числа, так и после 'мм'
+    m = re.search(
+        r"L\s*=\s*(\d+(?:[.,]\d+)?)\s*(_д\d*)?\s*мм\s*(_д\d*)?",
+        t, re.IGNORECASE,
+    )
     if not m:
         return None, ""
-    return int(m.group(1)), (m.group(2) or "")
+    raw = m.group(1).replace(",", ".")
+    length = math.ceil(float(raw))  # дробную — вверх до целого мм
+    dorab = m.group(2) or m.group(3) or ""
+    return length, dorab
 
 
 def grade_from_name(naim):

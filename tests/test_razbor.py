@@ -264,3 +264,67 @@ def test_059_круглая_труба_без_марки_ст3():
     ws = wb["Материалы"]
     codes = {ws.cell(r, 1).value for r in range(2, ws.max_row + 1)}
     assert any(str(c).startswith("ТР-К") and c.endswith("Ст3") for c in codes)
+
+
+# ====== Дробные длины и доработка после "мм" (Основание 052) ======
+
+def test_052_дробная_длина():
+    """Дробные длины (L = 59.5 мм) распознаются и округляются вверх."""
+    from sp_to_cutlist import length_from_name
+    assert length_from_name("L = 59.5 мм") == (60, "")
+    assert length_from_name("L = 545.2 мм_д") == (546, "_д")
+    assert length_from_name("L = 195 мм") == (195, "")
+    assert length_from_name("L = 1047,6 мм") == (1048, "")  # запятая тоже
+
+
+def test_052_доработка_после_мм():
+    """Доработка _д после 'мм' ловится (формат L = 545.2 мм_д)."""
+    from sp_to_cutlist import length_from_name
+    _, dorab = length_from_name("L = 866.8 мм_д")
+    assert dorab == "_д"
+
+
+def test_052_все_длины_распознаны():
+    """В спецификации 052 не должно остаться деталей без длины."""
+    wb = _convert(os.path.join(HERE, "data", "osnovanie052_drobnaya_dlina_etalon.xls"))
+    ws = wb["Детали"]
+    no_length = 0
+    for r in range(4, ws.max_row + 1):
+        if not ws.cell(r, 3).value and not ws.cell(r, 4).value:
+            continue
+        if not ws.cell(r, 4).value:
+            no_length += 1
+    assert no_length == 0, f"{no_length} деталей без длины"
+
+
+def test_052_профиль_гост30245():
+    """'Профиль40х40х2' (ГОСТ 30245) распознаётся как профильная труба."""
+    from sp_to_cutlist import classify_profile
+    pt, size = classify_profile("Профиль40х40х2 ГОСТ 30245-2003")
+    assert pt == "Труба профильная" and size == "40х40х2"
+
+
+# ====== 7 исполнений, масса в столбце "Примечание" (Каркас 052) ======
+
+def test_052kar_все_детали_распознаны():
+    """Профиль 50х50х4 (ГОСТ 30245) и 7 исполнений — все детали в раскрое, не 1."""
+    wb = _convert(os.path.join(HERE, "data", "karkas052_7ispolneniy_etalon.xls"))
+    ws = wb["Детали"]
+    count = sum(1 for r in range(4, ws.max_row + 1) if ws.cell(r, 3).value)
+    assert count > 100, f"распознано всего {count} деталей (ожидалось >100)"
+
+
+def test_052kar_масса_не_марка():
+    """Масса в столбце 'Примечание' не принимается за марку (берётся из наименования)."""
+    from sp_to_cutlist import grade_from_note
+    assert grade_from_note("1,23 кг") == ""
+    assert grade_from_note("0,37 кг 0,79 кг") == ""
+
+
+def test_052kar_материалы_с_верной_маркой():
+    """Марки берутся из наименования (С255/С355), не из массы."""
+    wb = _convert(os.path.join(HERE, "data", "karkas052_7ispolneniy_etalon.xls"))
+    ws = wb["Материалы"]
+    codes = {ws.cell(r, 1).value for r in range(2, ws.max_row + 1)}
+    assert "ТР-П-50х50х4-С255" in codes
+    assert any("С355" in str(c) for c in codes)
