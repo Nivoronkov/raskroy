@@ -11,10 +11,86 @@
 import re
 import os
 import sys
-import pandas as pd
+import xlrd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.formatting.rule import FormulaRule
+
+
+class _Row:
+    """Одна строка таблицы. Доступ r[col] по номеру столбца."""
+    __slots__ = ("_cells",)
+
+    def __init__(self, cells):
+        self._cells = cells
+
+    def __getitem__(self, col):
+        return self._cells[col] if 0 <= col < len(self._cells) else float("nan")
+
+
+class _Table:
+    """
+    Лёгкая замена pandas DataFrame для чтения спецификации.
+    Поддерживает ровно то, что использует конвертер: .iloc[i, c], .shape,
+    len(table), фильтрацию строк по числовой позиции и .iterrows().
+    Используется вместо pandas, т.к. pandas в .exe (PyInstaller) очень медленно
+    инициализируется при каждом чтении Excel и вызывает «зависание» окна.
+    Значения хранятся строками (аналог dtype=str), пустые ячейки -> 'nan'.
+    """
+    def __init__(self, rows):
+        self._rows = rows
+        self._ncols = max((len(r) for r in rows), default=0)
+
+    @property
+    def shape(self):
+        return (len(self._rows), self._ncols)
+
+    def __len__(self):
+        return len(self._rows)
+
+    class _ILoc:
+        def __init__(self, table):
+            self._t = table
+
+        def __getitem__(self, key):
+            i, c = key
+            row = self._t._rows[i]
+            return row[c] if 0 <= c < len(row) else "nan"
+
+    @property
+    def iloc(self):
+        return _Table._ILoc(self)
+
+    def rows_with_numeric_position(self, pos_col=2):
+        """Аналог df[df[2].notna() & df[2].str.match(r'^\\d+$')]."""
+        out = []
+        for cells in self._rows:
+            val = cells[pos_col] if pos_col < len(cells) else "nan"
+            if re.match(r"^\d+$", str(val).strip()):
+                out.append(_Row(cells))
+        return out
+
+
+def _cell_to_str(value):
+    """Значение ячейки xls -> строка как в pandas(dtype=str). Пустое -> 'nan'."""
+    if value is None or value == "":
+        return "nan"
+    if isinstance(value, float):
+        # xlrd числа отдаёт float: целые без .0, дробные как есть
+        if value == int(value):
+            return str(int(value))
+        return repr(value)
+    return str(value)
+
+
+def _read_xls(src_xls):
+    """Читает .xls в _Table через xlrd (быстро, без pandas/numpy)."""
+    book = xlrd.open_workbook(src_xls)
+    sheet = book.sheet_by_index(0)
+    rows = []
+    for r in range(sheet.nrows):
+        rows.append([_cell_to_str(sheet.cell_value(r, c)) for c in range(sheet.ncols)])
+    return _Table(rows)
 
 # Единый модуль нормализации (тот же, что использует справочник материалов),
 # чтобы код материала из спецификации был идентичен коду из справочника.
@@ -247,11 +323,11 @@ def detect_layout(df):
 
 
 def main(src_xls, out_xlsx):
-    df = pd.read_excel(src_xls, sheet_name=0, header=None, dtype=str)
+    df = _read_xls(src_xls)
     ispoln, mat_col, prim_col = detect_layout(df)
     has_isp = any(v for v in ispoln.values())
 
-    rows = df[df[2].notna() & df[2].astype(str).str.match(r"^\d+$", na=False)]
+    rows = df.rows_with_numeric_position(2)
 
     # Предпроход: в разделе "Материалы" профиль бывает написан строкой-заголовком
     # НАД позицией (напр. 'Труба Ду80х4,0'), а сама позиция содержит только
@@ -277,7 +353,7 @@ def main(src_xls, out_xlsx):
     parts, materials, checks, cut_off = [], {}, [], []
     base_desig = ""
 
-    for _, r in rows.iterrows():
+    for r in rows:
         naim = str(r[4]).strip()
         obozn_raw = str(r[3]).strip()
         pos = str(r[2]).strip()

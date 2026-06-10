@@ -13,7 +13,7 @@
   - конвертер sp_to_cutlist.py кладётся рядом с .exe (он подтягивается
     динамически при загрузке спецификации)
   - иконка app.ico (положи рядом со spec; если нет — убери параметр icon=)
-  - скрытые импорты pandas/openpyxl/xlrd (PyInstaller не всегда видит их сам)
+  - скрытые импорты openpyxl/xlrd (PyInstaller не всегда видит их сам)
   - справочники и app_config.json НЕ вшиваются — они создаются/редактируются
     рядом с .exe во время работы
 """
@@ -38,11 +38,14 @@ for _ico in ("app.ico", "app_ico.ico"):
 
 # Скрытые импорты — модули, которые подтягиваются не напрямую.
 hiddenimports = [
-    "pandas",
     "openpyxl",
     "openpyxl.cell._writer",
     "xlrd",
 ]
+
+# pandas/numpy больше НЕ нужны (конвертер читает .xls напрямую через xlrd).
+# Исключаем их из сборки — .exe легче и не зависает на инициализации pandas.
+EXCLUDES = ["pandas", "numpy", "matplotlib", "scipy", "PIL", "pytest"]
 
 a = Analysis(
     [os.path.join(APP, "main.py")],
@@ -53,7 +56,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=EXCLUDES,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
